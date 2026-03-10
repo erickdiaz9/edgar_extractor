@@ -5,6 +5,9 @@ Browse and download 10-K, 10-Q, and JSON filings from SEC EDGAR.
 Deployed via Streamlit Cloud — no server or API key needed.
 """
 
+import io
+import zipfile
+
 import streamlit as st
 import requests
 from datetime import datetime
@@ -128,6 +131,23 @@ def fetch_file_bytes(url: str) -> bytes:
     r = requests.get(url, headers=HEADERS, timeout=90)
     r.raise_for_status()
     return r.content
+
+
+@st.cache_data(show_spinner=False)
+def build_zip(file_tuples: tuple[tuple[str, str], ...]) -> bytes:
+    """
+    Pack a set of already-cached filing documents into a single ZIP.
+    `file_tuples` is an immutable ((url, filename), ...) so @st.cache_data
+    can key on it — the ZIP is only rebuilt when the set of ready files changes.
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for url, filename in file_tuples:
+            try:
+                zf.writestr(filename, fetch_file_bytes(url))
+            except Exception:
+                pass          # skip files that fail; already cached ones won't
+    return buf.getvalue()
 
 
 # ── Data helpers ───────────────────────────────────────────────────────────────
@@ -384,7 +404,7 @@ ticker  = st.session_state.ticker
 ready   = st.session_state.ready
 
 # Section header
-hc1, hc2, hc3 = st.columns([5, 1.2, 1.2])
+hc1, hc2, hc3, hc4 = st.columns([4, 1.2, 1.2, 1.7])
 with hc1:
     bs = BADGE_STYLE[folder]
     st.markdown(
@@ -419,6 +439,19 @@ with hc3:
         if errors:
             st.warning(f"{len(errors)} file(s) failed:\n" + "\n".join(errors))
         st.rerun()
+with hc4:
+    # Files in this folder that are already fetched
+    ready_here = [(f["doc_url"], f["filename"]) for f in filings if f["id"] in ready and f["doc_url"]]
+    if ready_here:
+        zip_bytes = build_zip(tuple(ready_here))
+        st.download_button(
+            label=f"💾 Save All ({len(ready_here)}) as ZIP",
+            data=zip_bytes,
+            file_name=f"{ticker}_{folder}_filings.zip",
+            mime="application/zip",
+            use_container_width=True,
+            type="primary",
+        )
 
 # Empty state
 if not filings:
