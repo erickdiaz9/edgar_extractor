@@ -115,14 +115,38 @@ def find_company(ticker: str) -> dict | None:
 
 @st.cache_data(ttl=1_800, show_spinner=False)
 def load_submissions(cik) -> dict:
-    """Fetch the EDGAR submissions JSON for a given CIK (cached 30 min)."""
+    """
+    Fetch ALL EDGAR submissions for a CIK, including paginated history.
+
+    EDGAR only puts the most-recent ~1 000 filings in the main JSON.
+    Long-standing companies (e.g. AXP since 1993) have their older
+    filings split across extra pages listed in sub['filings']['files'].
+    We fetch every page and merge its arrays into sub['filings']['recent']
+    so the rest of the app sees the complete filing history in one place.
+    """
     padded = str(cik).zfill(10)
     r = requests.get(
         f"https://data.sec.gov/submissions/CIK{padded}.json",
         headers=HEADERS, timeout=20,
     )
     r.raise_for_status()
-    return r.json()
+    sub = r.json()
+
+    # Paginated history pages — absent for newer/smaller companies,
+    # but essential for long-standing ones like AXP, JPM, GE, etc.
+    for file_meta in sub.get("filings", {}).get("files", []):
+        page_url = f"https://data.sec.gov/submissions/{file_meta['name']}"
+        pr = requests.get(page_url, headers=HEADERS, timeout=20)
+        if not pr.ok:
+            continue
+        # Each extra page is a flat dict of parallel arrays (same schema as
+        # filings.recent) — extend every list field to merge them together.
+        for field, values in pr.json().items():
+            if isinstance(values, list):
+                sub["filings"]["recent"].setdefault(field, [])
+                sub["filings"]["recent"][field].extend(values)
+
+    return sub
 
 
 @st.cache_data(ttl=600, show_spinner=False, max_entries=40)
@@ -269,7 +293,7 @@ def run_search(raw: str) -> None:
     st.session_state.sub     = None
     st.session_state.ready   = set()
 
-    with st.spinner(f"Looking up **{ticker}** on SEC EDGAR…"):
+    with st.spinner(f"Looking up **{ticker}** on SEC EDGAR (fetching full filing history)…"):
         company = find_company(ticker)
         if not company:
             st.session_state.error = (
