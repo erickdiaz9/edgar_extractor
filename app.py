@@ -376,6 +376,16 @@ def calc_cagr(df: pd.DataFrame, n_years: int | None = None) -> float | None:
     return (ev / sv) ** (1.0 / years) - 1.0
 
 
+def fmt_fiscal_year_end(code: str) -> str:
+    """Convert EDGAR's MMDD fiscal-year-end code (e.g. '0930') to 'Sep 30'."""
+    try:
+        from datetime import date
+        d = date(2000, int(code[:2]), int(code[2:]))
+        return d.strftime("%b %d")
+    except Exception:
+        return code or "—"
+
+
 def yaxis_tickformat(unit: str) -> str:
     if unit == "USD":        return "$,.3s"
     if unit == "shares":     return ",.3s"
@@ -486,6 +496,7 @@ _DEFAULTS = {
     # KPI Explorer state
     "kpi_tickers":  [],        # list of ticker strings with loaded facts
     "kpi_facts":    {},        # {ticker: facts_dict}
+    "kpi_subs":     {},        # {ticker: submissions_dict}  ← company profile info
     "kpi_concept":  None,      # selected concept path
     "kpi_period":   "annual",
     "kpi_error":    None,
@@ -539,6 +550,7 @@ def run_kpi_load(tickers_raw: str) -> None:
 
     st.session_state.kpi_error   = None
     st.session_state.kpi_facts   = {}
+    st.session_state.kpi_subs    = {}
     st.session_state.kpi_tickers = []
     st.session_state.kpi_concept = None   # reset so selector defaults to first
 
@@ -546,14 +558,16 @@ def run_kpi_load(tickers_raw: str) -> None:
     n = len(tickers)
     prog = st.progress(0, text="Loading company facts…")
     for idx, tk in enumerate(tickers):
-        prog.progress((idx) / n, text=f"Loading {tk}…")
+        prog.progress(idx / n, text=f"Loading {tk}…")
         company = find_company(tk)
         if not company:
             errors.append(f"**{tk}** not found in EDGAR.")
             continue
         try:
             facts = load_company_facts(company["cik_str"])
+            sub   = load_submissions(company["cik_str"])   # cached — free if Filings tab already loaded it
             st.session_state.kpi_facts[tk]   = facts
+            st.session_state.kpi_subs[tk]    = sub
             st.session_state.kpi_tickers.append(tk)
         except Exception as exc:
             errors.append(f"**{tk}**: {exc}")
@@ -893,6 +907,84 @@ else:
         </div>
         """, unsafe_allow_html=True)
         st.stop()
+
+    # ── Company profile cards ─────────────────────────────────────────────────
+    kpi_subs = st.session_state.kpi_subs
+    n_co     = len(kpi_tickers)
+    co_cols  = st.columns(n_co)
+
+    for i, tk in enumerate(kpi_tickers):
+        sub   = kpi_subs.get(tk, {})
+        facts = kpi_facts.get(tk, {})
+
+        name        = sub.get("name") or facts.get("entityName") or tk
+        cik         = sub.get("cik", "—")
+        exchanges   = ", ".join(sub.get("exchanges") or ["—"])
+        tickers_all = ", ".join(sub.get("tickers") or [tk])
+        sic         = sub.get("sic", "—")
+        sic_desc    = sub.get("sicDescription", "—")
+        state_inc   = sub.get("stateOfIncorporation", "—")
+        fy_end_raw  = sub.get("fiscalYearEnd", "")
+        fy_end      = fmt_fiscal_year_end(fy_end_raw) if fy_end_raw else "—"
+        category    = sub.get("category", "—")
+        phone       = sub.get("phone", "—")
+        ein         = sub.get("ein", "—")
+
+        # Business address
+        addr_block  = sub.get("addresses", {}).get("business", {})
+        city        = addr_block.get("city", "")
+        state       = addr_block.get("stateOrCountry", "")
+        zipcode     = addr_block.get("zipCode", "")
+        address_str = ", ".join(filter(None, [city, state, zipcode])) or "—"
+
+        # Count available KPIs
+        n_usgaap = len(facts.get("facts", {}).get("us-gaap", {}))
+        n_dei    = len(facts.get("facts", {}).get("dei", {}))
+
+        with co_cols[i]:
+            st.markdown(
+                f"""
+                <div style="background:#f8fafc;border:1.5px solid #e2e8f0;
+                            border-radius:10px;padding:16px 18px;margin-bottom:12px">
+                  <div style="font-size:1.1rem;font-weight:800;color:#0f172a;
+                              margin-bottom:4px">{name}</div>
+                  <div style="margin-bottom:10px">
+                    <span style="background:#dbeafe;color:#1e40af;padding:2px 9px;
+                                 border-radius:100px;font-size:11px;font-weight:700;
+                                 margin-right:6px">{tk}</span>
+                    <span style="background:#f1f5f9;color:#475569;padding:2px 9px;
+                                 border-radius:100px;font-size:11px">{exchanges}</span>
+                  </div>
+                  <table style="font-size:12px;border-collapse:collapse;width:100%">
+                    <tr><td style="color:#94a3b8;padding:2px 6px 2px 0;
+                                   white-space:nowrap">CIK</td>
+                        <td style="color:#1e293b;font-weight:600">{cik}</td></tr>
+                    <tr><td style="color:#94a3b8;padding:2px 6px 2px 0">Ticker(s)</td>
+                        <td style="color:#1e293b">{tickers_all}</td></tr>
+                    <tr><td style="color:#94a3b8;padding:2px 6px 2px 0">EIN</td>
+                        <td style="color:#1e293b">{ein}</td></tr>
+                    <tr><td style="color:#94a3b8;padding:2px 6px 2px 0">SIC</td>
+                        <td style="color:#1e293b">{sic} — {sic_desc}</td></tr>
+                    <tr><td style="color:#94a3b8;padding:2px 6px 2px 0">Category</td>
+                        <td style="color:#1e293b">{category}</td></tr>
+                    <tr><td style="color:#94a3b8;padding:2px 6px 2px 0">State Inc.</td>
+                        <td style="color:#1e293b">{state_inc}</td></tr>
+                    <tr><td style="color:#94a3b8;padding:2px 6px 2px 0">FY End</td>
+                        <td style="color:#1e293b">{fy_end}</td></tr>
+                    <tr><td style="color:#94a3b8;padding:2px 6px 2px 0">Phone</td>
+                        <td style="color:#1e293b">{phone}</td></tr>
+                    <tr><td style="color:#94a3b8;padding:2px 6px 2px 0">HQ</td>
+                        <td style="color:#1e293b">{address_str}</td></tr>
+                    <tr><td style="color:#94a3b8;padding:2px 6px 2px 0">KPIs</td>
+                        <td style="color:#1e293b">{n_usgaap:,} us-gaap
+                            · {n_dei} dei</td></tr>
+                  </table>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    st.divider()
 
     # ── Build concept list ────────────────────────────────────────────────────
     all_concepts   = get_all_concepts(list(kpi_facts.values()))
