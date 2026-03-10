@@ -249,8 +249,8 @@ def get_all_concepts(facts_list: list[dict]) -> list[tuple[str, str]]:
     popular_set = set(POPULAR_KPIS)
     popular     = [(p, seen[p]) for p in POPULAR_KPIS if p in seen]
     remaining   = sorted(
-        [(p, lbl) for p, lbl in seen.items() if p not in popular_set],
-        key=lambda x: x[1].lower(),
+        [(p, lbl or p) for p, lbl in seen.items() if p not in popular_set],
+        key=lambda x: (x[1] or x[0]).lower(),
     )
     return popular + remaining
 
