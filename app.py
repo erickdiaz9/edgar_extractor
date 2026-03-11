@@ -811,32 +811,44 @@ def compute_price_metrics(stmts: dict, prices: dict) -> None:
     price_s = pd.Series(
         {int(k): float(v) for k, v in prices.items()}, dtype=float
     ).sort_index()
+    # Normalise to int64 — XBRL uses int32, yfinance uses int64; pandas 2.x
+    # won't align them without this cast.
+    price_s.index = price_s.index.astype("int64")
 
     debug["prices"] = f"✅ {len(price_s)} yrs ({int(price_s.index.min())}–{int(price_s.index.max())})"
 
     def gs(m: str) -> pd.Series:
         s = get_stmt_series(stmts, m)
-        return s if s is not None else pd.Series(dtype=float)
+        if s is None:
+            return pd.Series(dtype=float)
+        # Cast index to int64 so arithmetic aligns regardless of int32/int64 mix
+        s = s.copy()
+        s.index = s.index.astype("int64")
+        return s
 
     def sdiv(a: pd.Series, b: pd.Series) -> pd.Series:
         return a.div(b.replace(0, float("nan")))
 
     sh  = gs("Diluted Shares")
-    eps = gs("EPS Diluted")
     te  = gs("Total Equity")
     div = gs("Dividends Paid")
 
-    def _dbg_series(s: pd.Series, label: str) -> str:
-        if s.empty:
-            return "❌ not found in XBRL"
-        yrs = sorted(s.index.tolist())
-        return f"✅ {len(s)} yrs | index dtype={s.index.dtype} | range={yrs[0]}–{yrs[-1]} | years={yrs[:5]}{'...' if len(yrs)>5 else ''}"
+    # EPS: try XBRL tag first, fall back to Net Income / Shares (handles
+    # companies like Visa that don't file EarningsPerShareDiluted with fp=FY)
+    eps = gs("EPS Diluted")
+    if eps.empty and not sh.empty:
+        ni = gs("Net Income")
+        if not ni.empty:
+            eps = sdiv(ni, sh)   # computed EPS = Net Income / Diluted Shares
 
-    debug["Diluted Shares"] = _dbg_series(sh,  "Diluted Shares")
-    debug["EPS Diluted"]    = _dbg_series(eps, "EPS Diluted") if not eps.empty else "❌ not found in XBRL"
-    debug["Total Equity"]   = _dbg_series(te,  "Total Equity")  if not te.empty  else "❌ not found in XBRL"
-    debug["Dividends Paid"] = _dbg_series(div, "Dividends Paid") if not div.empty else "❌ not found (company may not pay dividends)"
-    debug["price_s years"]  = f"index dtype={price_s.index.dtype} | {price_s.index.tolist()[:5]}..."
+    def _yr(s: pd.Series) -> str:
+        if s.empty: return "❌ not found"
+        return f"✅ {len(s)} yrs ({int(s.index.min())}–{int(s.index.max())})"
+
+    debug["Diluted Shares"] = _yr(sh)
+    debug["EPS Diluted"]    = _yr(eps) + (" [computed]" if not eps.empty and gs("EPS Diluted").empty else "")
+    debug["Total Equity"]   = _yr(te)
+    debug["Dividends Paid"] = _yr(div)
 
     new: dict[str, pd.Series] = {}
 
