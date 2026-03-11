@@ -360,14 +360,12 @@ def load_stock_prices(ticker: str) -> dict:
         hist = yf.Ticker(ticker).history(period="max", interval="1mo")
         if hist.empty:
             return {}
-        # Strip timezone so pandas groupby works cleanly
-        try:
-            hist.index = hist.index.tz_localize(None)
-        except TypeError:
+        # Strip timezone if present (yfinance returns tz-aware index)
+        if getattr(hist.index, "tz", None) is not None:
             hist.index = hist.index.tz_convert(None)
-        # Last monthly close per calendar year = approximate year-end price
-        hist["_yr"] = hist.index.year
-        yr_price = hist.groupby("_yr")["Close"].last()
+        hist.index = pd.to_datetime(hist.index)
+        # Last monthly close per calendar year ≈ year-end price
+        yr_price = hist["Close"].groupby(hist.index.year).last()
         return {int(yr): float(px) for yr, px in yr_price.items()}
     except Exception:
         return {}
@@ -580,12 +578,19 @@ def extract_annual_metric(facts: dict, tags: list[str]) -> tuple[pd.Series, str]
 
             rows = []
             for e in units[unit_key]:
-                if e.get("fp", "") != "FY":
+                fp   = e.get("fp",   "")
+                form = e.get("form", "")
+                # Keep fp=FY entries, plus 10-K entries as fallback
+                if fp != "FY" and form not in ("10-K", "10-K/A"):
                     continue
                 if e.get("end") is None or e.get("val") is None:
                     continue
-                rows.append({"end": e["end"], "val": float(e["val"]),
-                             "filed": e.get("filed", "")})
+                rows.append({
+                    "end":   e["end"],
+                    "val":   float(e["val"]),
+                    "filed": e.get("filed", ""),
+                    "is_fy": fp == "FY",
+                })
             if not rows:
                 continue
 
@@ -598,8 +603,15 @@ def extract_annual_metric(facts: dict, tags: list[str]) -> tuple[pd.Series, str]
             df = df.sort_values(["end", "filed"], ascending=[True, False])
             df = df.drop_duplicates(subset=["end"], keep="first")
 
-            # Map period-end → calendar year; if two ends fall in same year, keep latest
+            # Map period-end → calendar year
             df["year"] = df["end"].dt.year
+
+            # Per year: PREFER fp=FY entries; only fall back to 10-K if no FY exists
+            fy_years = set(df.loc[df["is_fy"], "year"])
+            if fy_years:
+                df = df[df["is_fy"] | ~df["year"].isin(fy_years)]
+
+            # If multiple non-FY entries remain for a year, take the latest end date
             df = df.sort_values(["year", "end"], ascending=[True, False])
             df = df.drop_duplicates(subset=["year"], keep="first")
 
@@ -1459,6 +1471,11 @@ else:
                 """,
                 unsafe_allow_html=True,
             )
+            prices_tk = st.session_state.kpi_prices.get(tk, {})
+            if prices_tk:
+                latest_yr  = max(prices_tk)
+                latest_px  = prices_tk[latest_yr]
+                st.caption(f"💹 Stock price loaded · {len(prices_tk)} yrs · latest {latest_yr}: ${latest_px:,.2f}")
 
     st.divider()
 
