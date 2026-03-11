@@ -808,105 +808,88 @@ def compute_price_metrics(stmts: dict, prices: dict) -> None:
     if not stmts:
         return
 
-    price_s = pd.Series(
-        {int(k): float(v) for k, v in prices.items()}, dtype=float
-    ).sort_index()
-    # Normalise to int64 — XBRL uses int32, yfinance uses int64; pandas 2.x
-    # won't align them without this cast.
-    price_s.index = price_s.index.astype("int64")
+    # ── Convert everything to plain Python {int_year: float_value} dicts ─────
+    # This completely sidesteps pandas int32/int64 index alignment bugs.
+    def to_pydict(s: pd.Series | None) -> dict[int, float]:
+        if s is None or (hasattr(s, "empty") and s.empty):
+            return {}
+        return {
+            int(k): float(v)
+            for k, v in s.items()
+            if v is not None and not (isinstance(v, float) and v != v)  # skip NaN
+        }
 
-    debug["prices"] = f"✅ {len(price_s)} yrs ({int(price_s.index.min())}–{int(price_s.index.max())})"
+    def gs_dict(m: str) -> dict[int, float]:
+        return to_pydict(get_stmt_series(stmts, m))
 
-    def gs(m: str) -> pd.Series:
-        s = get_stmt_series(stmts, m)
-        if s is None:
-            return pd.Series(dtype=float)
-        # Cast index to int64 so arithmetic aligns regardless of int32/int64 mix
-        s = s.copy()
-        s.index = s.index.astype("int64")
-        return s
+    px  = to_pydict(pd.Series({int(k): float(v) for k, v in prices.items()}))
+    sh  = gs_dict("Diluted Shares")
+    te  = gs_dict("Total Equity")
+    div = gs_dict("Dividends Paid")
+    eps = gs_dict("EPS Diluted")
 
-    def sdiv(a: pd.Series, b: pd.Series) -> pd.Series:
-        return a.div(b.replace(0, float("nan")))
+    # EPS fallback: Net Income / Diluted Shares
+    if not eps and sh:
+        ni = gs_dict("Net Income")
+        eps = {
+            yr: ni[yr] / sh[yr]
+            for yr in set(ni) & set(sh)
+            if sh[yr] != 0 and ni.get(yr) is not None
+        }
 
-    sh  = gs("Diluted Shares")
-    te  = gs("Total Equity")
-    div = gs("Dividends Paid")
+    def _yr(d: dict, label: str = "") -> str:
+        if not d: return "❌ not found"
+        yrs = sorted(d)
+        return f"✅ {len(d)} yrs ({yrs[0]}–{yrs[-1]})"
 
-    # EPS: try XBRL tag first, fall back to Net Income / Shares (handles
-    # companies like Visa that don't file EarningsPerShareDiluted with fp=FY)
-    eps = gs("EPS Diluted")
-    if eps.empty and not sh.empty:
-        ni = gs("Net Income")
-        if not ni.empty:
-            eps = sdiv(ni, sh)   # computed EPS = Net Income / Diluted Shares
-
-    def _yr(s: pd.Series) -> str:
-        if s.empty: return "❌ not found"
-        return f"✅ {len(s)} yrs ({int(s.index.min())}–{int(s.index.max())})"
-
-    debug["Diluted Shares"] = _yr(sh)
-    debug["EPS Diluted"]    = _yr(eps) + (" [computed]" if not eps.empty and gs("EPS Diluted").empty else "")
-    debug["Total Equity"]   = _yr(te)
-    debug["Dividends Paid"] = _yr(div)
-
-    def align2(a: pd.Series, b: pd.Series) -> tuple[pd.Series, pd.Series]:
-        """Return both series restricted to their common years (explicit intersection)."""
-        common = a.index.intersection(b.index)
-        return a.loc[common], b.loc[common]
+    debug["prices"]        = _yr(px)
+    debug["Diluted Shares"]= _yr(sh)
+    debug["EPS Diluted"]   = _yr(eps) + (" [computed]" if eps and not gs_dict("EPS Diluted") else "")
+    debug["Total Equity"]  = _yr(te)
+    debug["Dividends Paid"]= _yr(div)
 
     new: dict[str, pd.Series] = {}
 
+    def make_series(d: dict) -> pd.Series:
+        return pd.Series(d, dtype=float).sort_index() if d else pd.Series(dtype=float)
+
     # Market Cap = Price × Shares
-    if not sh.empty:
-        px, s = align2(price_s, sh)
-        mc = (px * s).dropna()
-        if not mc.empty:
-            new["Market Cap"] = mc
-            debug["Market Cap"] = f"✅ {len(mc)} yrs"
-        else:
-            debug["Market Cap"] = f"❌ 0 common years (price {len(price_s)}, shares {len(sh)})"
+    mc_d = {yr: px[yr] * sh[yr] for yr in set(px) & set(sh)}
+    if mc_d:
+        new["Market Cap"] = make_series(mc_d)
+        debug["Market Cap"] = f"✅ {len(mc_d)} yrs"
     else:
         debug["Market Cap"] = "❌ needs Diluted Shares"
 
-    # P/E Ratio = Price / EPS  (only positive P/E makes sense to show)
-    if not eps.empty:
-        px, e = align2(price_s, eps)
-        pe = (px / e.replace(0, float("nan"))).dropna()
-        pe = pe[pe > 0]
-        if not pe.empty:
-            new["P/E Ratio"] = pe
-            debug["P/E Ratio"] = f"✅ {len(pe)} yrs"
-        else:
-            debug["P/E Ratio"] = "❌ no positive P/E values"
+    # P/E Ratio = Price / EPS (positive only)
+    pe_d = {yr: px[yr] / eps[yr] for yr in set(px) & set(eps) if eps.get(yr, 0) > 0 and px[yr] / eps[yr] > 0}
+    if pe_d:
+        new["P/E Ratio"] = make_series(pe_d)
+        debug["P/E Ratio"] = f"✅ {len(pe_d)} yrs"
     else:
         debug["P/E Ratio"] = "❌ needs EPS Diluted"
 
-    # Price/Book = (Price × Shares) / Total Equity
-    if not sh.empty and not te.empty:
-        common3 = price_s.index.intersection(sh.index).intersection(te.index)
-        mc3 = price_s.loc[common3] * sh.loc[common3]
-        pb  = (mc3 / te.loc[common3].replace(0, float("nan"))).dropna()
-        pb  = pb[pb > 0]
-        if not pb.empty:
-            new["Price/Book"] = pb
-            debug["Price/Book"] = f"✅ {len(pb)} yrs"
-        else:
-            debug["Price/Book"] = "❌ no positive P/B values"
+    # Price/Book = (Price × Shares) / Total Equity (positive only)
+    pb_d = {
+        yr: (px[yr] * sh[yr]) / te[yr]
+        for yr in set(px) & set(sh) & set(te)
+        if te.get(yr, 0) != 0 and (px[yr] * sh[yr]) / te[yr] > 0
+    }
+    if pb_d:
+        new["Price/Book"] = make_series(pb_d)
+        debug["Price/Book"] = f"✅ {len(pb_d)} yrs"
     else:
         debug["Price/Book"] = "❌ needs Diluted Shares + Total Equity"
 
     # Dividend Yield = (Dividends Paid / Shares) / Price
-    if not div.empty and not sh.empty:
-        common3 = price_s.index.intersection(sh.index).intersection(div.index)
-        dps = (div.loc[common3] / sh.loc[common3].replace(0, float("nan")))
-        dy  = (dps / price_s.loc[common3].replace(0, float("nan"))).dropna()
-        dy  = dy[dy >= 0]
-        if not dy.empty:
-            new["Dividend Yield"] = dy
-            debug["Dividend Yield"] = f"✅ {len(dy)} yrs"
-        else:
-            debug["Dividend Yield"] = "❌ no year overlap"
+    dy_d = {
+        yr: (div[yr] / sh[yr]) / px[yr]
+        for yr in set(px) & set(sh) & set(div)
+        if sh.get(yr, 0) != 0 and px.get(yr, 0) != 0 and (div[yr] / sh[yr]) / px[yr] >= 0
+    }
+    if dy_d:
+        new["Dividend Yield"] = make_series(dy_d)
+        debug["Dividend Yield"] = f"✅ {len(dy_d)} yrs"
     else:
         debug["Dividend Yield"] = "❌ needs Dividends Paid + Diluted Shares"
 
