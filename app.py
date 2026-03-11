@@ -868,7 +868,7 @@ else:
         else st.session_state.ticker
     )
 
-    inp_col, btn_col = st.columns([5, 1])
+    inp_col, btn_col, ref_col = st.columns([5, 1, 1])
     with inp_col:
         kpi_tickers_raw = st.text_input(
             "Companies",
@@ -881,6 +881,19 @@ else:
         load_clicked = st.button(
             "📊 Load", type="primary", use_container_width=True, key="kpi_load_btn"
         )
+    with ref_col:
+        refresh_clicked = st.button(
+            "🔄 Refresh", use_container_width=True, key="kpi_refresh_btn",
+            help="Clear cached EDGAR data and fetch the latest — use this if recent filings are missing",
+        )
+
+    if refresh_clicked:
+        load_company_facts.clear()
+        load_submissions.clear()
+        st.session_state.kpi_facts   = {}
+        st.session_state.kpi_subs    = {}
+        st.session_state.kpi_tickers = []
+        st.info("Cache cleared. Click **📊 Load** to fetch fresh data from EDGAR.")
 
     if load_clicked:
         run_kpi_load(kpi_tickers_raw)
@@ -1027,7 +1040,7 @@ else:
             "Index to 100",
             value=False,
             key="kpi_normalize",
-            help="Set first data point = 100 for each company — useful for relative comparison",
+            help="Normalize each company to 100 at a chosen base year — useful for relative growth comparison",
         )
         show_yoy = st.checkbox(
             "Show YoY %",
@@ -1063,15 +1076,22 @@ else:
         )
         st.stop()
 
-    # ── Date-range filter ─────────────────────────────────────────────────────
+    # ── Date-range + base-year controls ──────────────────────────────────────
     all_years = sorted({
         int(row["date"].year)
         for df in series_data.values()
         for _, row in df.iterrows()
     })
+
     if len(all_years) >= 2:
         yr_min, yr_max = all_years[0], all_years[-1]
-        range_col, _ = st.columns([3, 2])
+
+        # Show year-range slider and optional base-year picker in the same row
+        if normalize:
+            range_col, base_col = st.columns([3, 2])
+        else:
+            range_col, base_col = st.columns([3, 2])   # base_col unused when not normalizing
+
         with range_col:
             yr_from, yr_to = st.slider(
                 "Year range",
@@ -1080,13 +1100,26 @@ else:
                 value=(yr_min, yr_max),
                 key="kpi_year_range",
             )
-        # Apply filter
+
+        base_year = yr_from   # default: first year of the visible range
+        if normalize:
+            with base_col:
+                # Only show years within the selected range
+                base_year = st.select_slider(
+                    "Index base year  (= 100)",
+                    options=list(range(yr_from, yr_to + 1)),
+                    value=yr_from,
+                    key="kpi_base_year",
+                )
+
+        # Apply year-range filter
         series_data = {
             tk: df[(df["date"].dt.year >= yr_from) & (df["date"].dt.year <= yr_to)]
             for tk, df in series_data.items()
-            if not df.empty
         }
         series_data = {tk: df for tk, df in series_data.items() if not df.empty}
+    else:
+        base_year = all_years[0] if all_years else None
 
     if not series_data:
         st.info("No data in the selected year range.")
@@ -1094,15 +1127,38 @@ else:
 
     # ── Plotly chart ──────────────────────────────────────────────────────────
     fig = go.Figure()
+    index_warnings: list[str] = []   # collect per-company issues for normalize mode
 
     for i, (tk, df) in enumerate(series_data.items()):
         color  = CHART_COLORS[i % len(CHART_COLORS)]
         y_vals = df["value"].copy().astype(float)
 
         if normalize:
-            first = y_vals.iloc[0]
-            if first != 0:
-                y_vals = y_vals / first * 100
+            # Find value at the chosen base year (exact match → nearest → first positive)
+            base_rows = df[df["date"].dt.year == base_year]
+            if not base_rows.empty:
+                base_val = float(base_rows.iloc[0]["value"])
+                base_lbl = f"{base_year}"
+            else:
+                # No data at base_year; fall back to first positive value
+                pos = df[df["value"] > 0]
+                if pos.empty:
+                    index_warnings.append(
+                        f"**{tk}**: all values are ≤ 0 — cannot index to 100, shown as-is."
+                    )
+                    base_val = None
+                else:
+                    base_val = float(pos.iloc[0]["value"])
+                    base_lbl = str(int(pos.iloc[0]["date"].year))
+                    index_warnings.append(
+                        f"**{tk}**: no data for {base_year}, indexed from first positive year "
+                        f"({base_lbl} = {fmt_value(base_val, unit_str)})."
+                    )
+
+            if base_val and base_val != 0:
+                y_vals = y_vals / base_val * 100
+            elif base_val == 0:
+                index_warnings.append(f"**{tk}**: value is exactly 0 in {base_year} — cannot index.")
 
         if show_yoy:
             pct = y_vals.pct_change() * 100
@@ -1111,7 +1167,7 @@ else:
         else:
             y_plot = y_vals
 
-        # Custom hover data: always show the raw formatted value
+        # Custom hover: always show the raw formatted value
         custom = df["value"].apply(lambda v: fmt_value(v, unit_str)).tolist()
 
         if show_yoy:
@@ -1143,13 +1199,17 @@ else:
             hovertemplate=hover,
         ))
 
+    # Show index warnings if any
+    if index_warnings:
+        st.info("ℹ️ " + "  \n".join(index_warnings))
+
     # Y-axis config
     if show_yoy:
         ytitle = "YoY Growth (%)"
         yfmt   = ".1f"
         ysuf   = "%"
     elif normalize:
-        ytitle = "Indexed (base = 100)"
+        ytitle = f"Indexed (base year {base_year} = 100)"
         yfmt   = ".0f"
         ysuf   = ""
     else:
@@ -1180,6 +1240,21 @@ else:
     )
 
     st.plotly_chart(fig, use_container_width=True)
+
+    # ── Data coverage note ────────────────────────────────────────────────────
+    coverage_parts = []
+    for tk, df in series_data.items():
+        if df.empty:
+            continue
+        yr_start = int(df["date"].dt.year.min())
+        yr_end   = int(df["date"].dt.year.max())
+        n        = len(df)
+        coverage_parts.append(f"**{tk}** {yr_start}–{yr_end} ({n} pts)")
+    if coverage_parts:
+        st.caption(
+            "📅 Data coverage for this KPI:  " + "  ·  ".join(coverage_parts)
+            + "  —  Missing recent years? Click **🔄 Refresh** above to fetch latest EDGAR data."
+        )
 
     # ── Metric cards (one per company) ────────────────────────────────────────
     if not show_yoy and not normalize and series_data:
