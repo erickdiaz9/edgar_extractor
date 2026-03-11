@@ -850,48 +850,57 @@ def compute_price_metrics(stmts: dict, prices: dict) -> None:
     debug["Total Equity"]   = _yr(te)
     debug["Dividends Paid"] = _yr(div)
 
+    def align2(a: pd.Series, b: pd.Series) -> tuple[pd.Series, pd.Series]:
+        """Return both series restricted to their common years (explicit intersection)."""
+        common = a.index.intersection(b.index)
+        return a.loc[common], b.loc[common]
+
     new: dict[str, pd.Series] = {}
 
     # Market Cap = Price × Shares
     if not sh.empty:
-        mc = price_s.mul(sh).dropna()
+        px, s = align2(price_s, sh)
+        mc = (px * s).dropna()
         if not mc.empty:
             new["Market Cap"] = mc
             debug["Market Cap"] = f"✅ {len(mc)} yrs"
         else:
-            debug["Market Cap"] = "❌ price/share years don't overlap"
+            debug["Market Cap"] = f"❌ 0 common years (price {len(price_s)}, shares {len(sh)})"
     else:
         debug["Market Cap"] = "❌ needs Diluted Shares"
 
     # P/E Ratio = Price / EPS  (only positive P/E makes sense to show)
     if not eps.empty:
-        pe = sdiv(price_s, eps).dropna()
+        px, e = align2(price_s, eps)
+        pe = (px / e.replace(0, float("nan"))).dropna()
         pe = pe[pe > 0]
         if not pe.empty:
             new["P/E Ratio"] = pe
             debug["P/E Ratio"] = f"✅ {len(pe)} yrs"
         else:
-            debug["P/E Ratio"] = "❌ no positive P/E values (loss years or no year overlap)"
+            debug["P/E Ratio"] = "❌ no positive P/E values"
     else:
         debug["P/E Ratio"] = "❌ needs EPS Diluted"
 
-    # Price/Book = Market Cap / Total Equity
+    # Price/Book = (Price × Shares) / Total Equity
     if not sh.empty and not te.empty:
-        mc = price_s.mul(sh)
-        pb = sdiv(mc, te).dropna()
-        pb = pb[pb > 0]
+        common3 = price_s.index.intersection(sh.index).intersection(te.index)
+        mc3 = price_s.loc[common3] * sh.loc[common3]
+        pb  = (mc3 / te.loc[common3].replace(0, float("nan"))).dropna()
+        pb  = pb[pb > 0]
         if not pb.empty:
             new["Price/Book"] = pb
             debug["Price/Book"] = f"✅ {len(pb)} yrs"
         else:
-            debug["Price/Book"] = "❌ no positive P/B values or no year overlap"
+            debug["Price/Book"] = "❌ no positive P/B values"
     else:
         debug["Price/Book"] = "❌ needs Diluted Shares + Total Equity"
 
     # Dividend Yield = (Dividends Paid / Shares) / Price
     if not div.empty and not sh.empty:
-        dps = sdiv(div, sh)
-        dy  = sdiv(dps, price_s).dropna()
+        common3 = price_s.index.intersection(sh.index).intersection(div.index)
+        dps = (div.loc[common3] / sh.loc[common3].replace(0, float("nan")))
+        dy  = (dps / price_s.loc[common3].replace(0, float("nan"))).dropna()
         dy  = dy[dy >= 0]
         if not dy.empty:
             new["Dividend Yield"] = dy
