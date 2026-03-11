@@ -232,7 +232,9 @@ CASHFLOW_METRICS = ["Operating Cash Flow", "CapEx", "D&A", "Share Repurchases", 
 DERIVED_METRICS  = ["Gross Margin", "Operating Margin", "Net Margin",
                      "Revenue Growth", "Net Income Growth",
                      "FCF", "FCF Margin", "ROA", "ROE",
-                     "Net Debt", "Debt/Equity", "Debt/Assets"]
+                     "Net Debt", "Debt/Equity", "Debt/Assets",
+                     # Price-based (populated when yfinance data is available)
+                     "Market Cap", "P/E Ratio", "Price/Book", "Dividend Yield"]
 ALL_STD_METRICS  = INCOME_METRICS + BALANCE_METRICS + CASHFLOW_METRICS + DERIVED_METRICS
 
 # Display metadata: fmt codes = usd_b | usd_share | shares_b | pct | pct_signed | ratio
@@ -262,7 +264,7 @@ METRIC_DISPLAY: dict[str, dict] = {
     "CapEx":               {"fmt": "usd_b",    "negate": True},
     "D&A":                 {"fmt": "usd_b"},
     "Share Repurchases":   {"fmt": "usd_b",    "negate": True},
-    "Dividends Paid":      {"fmt": "usd_b",    "negate": True},
+    "Dividends Paid":      {"fmt": "usd_b"},
     "Gross Margin":        {"fmt": "pct"},
     "Operating Margin":    {"fmt": "pct"},
     "Net Margin":          {"fmt": "pct"},
@@ -275,6 +277,11 @@ METRIC_DISPLAY: dict[str, dict] = {
     "Net Debt":            {"fmt": "usd_b"},
     "Debt/Equity":         {"fmt": "ratio"},
     "Debt/Assets":         {"fmt": "ratio"},
+    # Price-based derived metrics
+    "Market Cap":          {"fmt": "usd_b",    "key": True},
+    "P/E Ratio":           {"fmt": "ratio"},
+    "Price/Book":          {"fmt": "ratio"},
+    "Dividend Yield":      {"fmt": "pct"},
 }
 
 # ── SEC EDGAR API (all cached) ─────────────────────────────────────────────────
@@ -340,6 +347,30 @@ def load_company_facts(cik) -> dict:
     )
     r.raise_for_status()
     return r.json()
+
+
+@st.cache_data(ttl=3_600, show_spinner=False)
+def load_stock_prices(ticker: str) -> dict:
+    """
+    Fetch year-end closing prices via yfinance.
+    Returns {year: price} dict, or {} on failure.
+    """
+    try:
+        import yfinance as yf
+        hist = yf.Ticker(ticker).history(period="max", interval="1mo")
+        if hist.empty:
+            return {}
+        # Strip timezone so pandas groupby works cleanly
+        try:
+            hist.index = hist.index.tz_localize(None)
+        except TypeError:
+            hist.index = hist.index.tz_convert(None)
+        # Last monthly close per calendar year = approximate year-end price
+        hist["_yr"] = hist.index.year
+        yr_price = hist.groupby("_yr")["Close"].last()
+        return {int(yr): float(px) for yr, px in yr_price.items()}
+    except Exception:
+        return {}
 
 
 @st.cache_data(ttl=600, show_spinner=False, max_entries=40)
@@ -745,6 +776,74 @@ def get_stmt_series(stmts: dict, metric: str) -> pd.Series | None:
     return None
 
 
+def compute_price_metrics(stmts: dict, prices: dict) -> None:
+    """
+    Enrich the 'derived' DataFrame in stmts with price-based metrics:
+    Market Cap, P/E Ratio, Price/Book, Dividend Yield.
+    Modifies stmts in-place. No-op if prices is empty.
+    """
+    if not prices or not stmts:
+        return
+
+    price_s = pd.Series(
+        {int(k): float(v) for k, v in prices.items()}, dtype=float
+    ).sort_index()
+
+    def gs(m: str) -> pd.Series:
+        s = get_stmt_series(stmts, m)
+        return s if s is not None else pd.Series(dtype=float)
+
+    def sdiv(a: pd.Series, b: pd.Series) -> pd.Series:
+        return a.div(b.replace(0, float("nan")))
+
+    sh  = gs("Diluted Shares")
+    eps = gs("EPS Diluted")
+    te  = gs("Total Equity")
+    div = gs("Dividends Paid")
+
+    new: dict[str, pd.Series] = {}
+
+    # Market Cap = Price × Shares
+    if not sh.empty:
+        mc = price_s.mul(sh).dropna()
+        if not mc.empty:
+            new["Market Cap"] = mc
+
+    # P/E Ratio = Price / EPS  (only positive P/E makes sense to show)
+    if not eps.empty:
+        pe = sdiv(price_s, eps).dropna()
+        pe = pe[pe > 0]
+        if not pe.empty:
+            new["P/E Ratio"] = pe
+
+    # Price/Book = Market Cap / Total Equity
+    if not sh.empty and not te.empty:
+        mc = price_s.mul(sh)
+        pb = sdiv(mc, te).dropna()
+        pb = pb[pb > 0]
+        if not pb.empty:
+            new["Price/Book"] = pb
+
+    # Dividend Yield = (Dividends Paid / Shares) / Price
+    if not div.empty and not sh.empty:
+        dps = sdiv(div, sh)
+        dy  = sdiv(dps, price_s).dropna()
+        dy  = dy[dy >= 0]
+        if not dy.empty:
+            new["Dividend Yield"] = dy
+
+    if not new:
+        return
+
+    new_df = pd.DataFrame(new).sort_index(ascending=False)
+    drv = stmts.get("derived", pd.DataFrame())
+    if drv.empty:
+        stmts["derived"] = new_df
+    else:
+        combined = pd.concat([drv, new_df], axis=1)
+        stmts["derived"] = combined.sort_index(ascending=False)
+
+
 # ── Filings data helpers ───────────────────────────────────────────────────────
 def period_label(form: str, date_str: str) -> str:
     if not date_str:
@@ -850,6 +949,7 @@ _DEFAULTS = {
     "kpi_facts":    {},        # {ticker: facts_dict}
     "kpi_subs":     {},        # {ticker: submissions_dict}  ← company profile info
     "kpi_stmts":    {},        # {ticker: {"income":df,"balance":df,"cashflow":df,"derived":df}}
+    "kpi_prices":   {},        # {ticker: {year: price}}
     "kpi_concept":  None,      # selected concept path
     "kpi_period":   "annual",
     "kpi_error":    None,
@@ -905,6 +1005,7 @@ def run_kpi_load(tickers_raw: str) -> None:
     st.session_state.kpi_facts   = {}
     st.session_state.kpi_subs    = {}
     st.session_state.kpi_stmts   = {}
+    st.session_state.kpi_prices  = {}
     st.session_state.kpi_tickers = []
     st.session_state.kpi_concept = None   # reset so selector defaults to first
 
@@ -918,11 +1019,15 @@ def run_kpi_load(tickers_raw: str) -> None:
             errors.append(f"**{tk}** not found in EDGAR.")
             continue
         try:
-            facts = load_company_facts(company["cik_str"])
-            sub   = load_submissions(company["cik_str"])
+            facts  = load_company_facts(company["cik_str"])
+            sub    = load_submissions(company["cik_str"])
+            stmts  = build_financial_statements(facts)
+            prices = load_stock_prices(tk)
+            compute_price_metrics(stmts, prices)
             st.session_state.kpi_facts[tk]   = facts
             st.session_state.kpi_subs[tk]    = sub
-            st.session_state.kpi_stmts[tk]   = build_financial_statements(facts)
+            st.session_state.kpi_stmts[tk]   = stmts
+            st.session_state.kpi_prices[tk]  = prices
             st.session_state.kpi_tickers.append(tk)
         except Exception as exc:
             errors.append(f"**{tk}**: {exc}")
@@ -1245,9 +1350,11 @@ else:
     if refresh_clicked:
         load_company_facts.clear()
         load_submissions.clear()
+        load_stock_prices.clear()
         st.session_state.kpi_facts   = {}
         st.session_state.kpi_subs    = {}
         st.session_state.kpi_stmts   = {}
+        st.session_state.kpi_prices  = {}
         st.session_state.kpi_tickers = []
         st.info("Cache cleared. Click **📊 Load** to fetch fresh data from EDGAR.")
 
