@@ -163,11 +163,16 @@ METRIC_TAGS: dict[str, list[str]] = {
         "NetIncomeLossAvailableToCommonStockholdersBasic",
         "ProfitLoss",
     ],
-    "EPS Diluted":   ["EarningsPerShareDiluted"],
-    "EPS Basic":     ["EarningsPerShareBasic"],
+    "EPS Diluted": [
+        "EarningsPerShareDiluted",
+        "EarningsPerShareBasic",
+    ],
+    "EPS Basic":   ["EarningsPerShareBasic"],
     "Diluted Shares": [
         "WeightedAverageNumberOfDilutedSharesOutstanding",
         "WeightedAverageNumberOfSharesOutstandingBasic",
+        "CommonStockSharesOutstanding",
+        "EntityCommonStockSharesOutstanding",  # dei namespace, very broadly available
     ],
     # Balance Sheet
     "Total Assets": ["Assets"],
@@ -793,13 +798,21 @@ def compute_price_metrics(stmts: dict, prices: dict) -> None:
     Enrich the 'derived' DataFrame in stmts with price-based metrics:
     Market Cap, P/E Ratio, Price/Book, Dividend Yield.
     Modifies stmts in-place. No-op if prices is empty.
+    Also stores stmts["price_debug"] with availability info for diagnostics.
     """
-    if not prices or not stmts:
+    debug: dict[str, str] = {}
+
+    if not prices:
+        stmts["price_debug"] = {"prices": "❌ no price data from yfinance"}
+        return
+    if not stmts:
         return
 
     price_s = pd.Series(
         {int(k): float(v) for k, v in prices.items()}, dtype=float
     ).sort_index()
+
+    debug["prices"] = f"✅ {len(price_s)} yrs ({int(price_s.index.min())}–{int(price_s.index.max())})"
 
     def gs(m: str) -> pd.Series:
         s = get_stmt_series(stmts, m)
@@ -813,6 +826,11 @@ def compute_price_metrics(stmts: dict, prices: dict) -> None:
     te  = gs("Total Equity")
     div = gs("Dividends Paid")
 
+    debug["Diluted Shares"] = f"✅ {len(sh)} yrs" if not sh.empty else "❌ not found in XBRL"
+    debug["EPS Diluted"]    = f"✅ {len(eps)} yrs" if not eps.empty else "❌ not found in XBRL"
+    debug["Total Equity"]   = f"✅ {len(te)} yrs"  if not te.empty  else "❌ not found in XBRL"
+    debug["Dividends Paid"] = f"✅ {len(div)} yrs" if not div.empty else "❌ not found (company may not pay dividends)"
+
     new: dict[str, pd.Series] = {}
 
     # Market Cap = Price × Shares
@@ -820,6 +838,11 @@ def compute_price_metrics(stmts: dict, prices: dict) -> None:
         mc = price_s.mul(sh).dropna()
         if not mc.empty:
             new["Market Cap"] = mc
+            debug["Market Cap"] = f"✅ {len(mc)} yrs"
+        else:
+            debug["Market Cap"] = "❌ price/share years don't overlap"
+    else:
+        debug["Market Cap"] = "❌ needs Diluted Shares"
 
     # P/E Ratio = Price / EPS  (only positive P/E makes sense to show)
     if not eps.empty:
@@ -827,6 +850,11 @@ def compute_price_metrics(stmts: dict, prices: dict) -> None:
         pe = pe[pe > 0]
         if not pe.empty:
             new["P/E Ratio"] = pe
+            debug["P/E Ratio"] = f"✅ {len(pe)} yrs"
+        else:
+            debug["P/E Ratio"] = "❌ no positive P/E values (loss years or no year overlap)"
+    else:
+        debug["P/E Ratio"] = "❌ needs EPS Diluted"
 
     # Price/Book = Market Cap / Total Equity
     if not sh.empty and not te.empty:
@@ -835,6 +863,11 @@ def compute_price_metrics(stmts: dict, prices: dict) -> None:
         pb = pb[pb > 0]
         if not pb.empty:
             new["Price/Book"] = pb
+            debug["Price/Book"] = f"✅ {len(pb)} yrs"
+        else:
+            debug["Price/Book"] = "❌ no positive P/B values or no year overlap"
+    else:
+        debug["Price/Book"] = "❌ needs Diluted Shares + Total Equity"
 
     # Dividend Yield = (Dividends Paid / Shares) / Price
     if not div.empty and not sh.empty:
@@ -843,6 +876,13 @@ def compute_price_metrics(stmts: dict, prices: dict) -> None:
         dy  = dy[dy >= 0]
         if not dy.empty:
             new["Dividend Yield"] = dy
+            debug["Dividend Yield"] = f"✅ {len(dy)} yrs"
+        else:
+            debug["Dividend Yield"] = "❌ no year overlap"
+    else:
+        debug["Dividend Yield"] = "❌ needs Dividends Paid + Diluted Shares"
+
+    stmts["price_debug"] = debug
 
     if not new:
         return
@@ -1604,6 +1644,14 @@ else:
                   CASHFLOW_METRICS, "cashflow", "Cash Flow Statement")
         _stmt_tab(tab_drv, stmts.get("derived",  pd.DataFrame()),
                   DERIVED_METRICS,  "derived",  "Derived Metrics")
+
+        # ── Price metrics diagnostics (inside Derived Metrics tab) ────────────
+        with tab_drv:
+            dbg = stmts.get("price_debug", {})
+            if dbg:
+                with st.expander("🔍 Price metrics diagnostics", expanded=False):
+                    for k, v in dbg.items():
+                        st.markdown(f"**{k}**: {v}")
 
         # ── Compare Companies tab ─────────────────────────────────────────────
         with tab_cmp:
