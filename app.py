@@ -1,4 +1,4 @@
-"""
+﻿"""
 SEC Filings Explorer
 ────────────────────
 Browse and download 10-K, 10-Q, and JSON filings from SEC EDGAR.
@@ -141,6 +141,141 @@ CHART_COLORS = [
     "#3b82f6", "#ef4444", "#10b981", "#f59e0b",
     "#8b5cf6", "#ec4899", "#06b6d4", "#84cc16",
 ]
+
+# ── Standardized XBRL tag mappings ────────────────────────────────────────────
+# For each canonical metric, list XBRL tags in priority order.
+# The first tag that yields annual FY data wins.
+METRIC_TAGS: dict[str, list[str]] = {
+    # Income Statement
+    "Revenue": [
+        "Revenues",
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "RevenueFromContractWithCustomerIncludingAssessedTax",
+        "SalesRevenueNet", "SalesRevenueGoodsNet",
+        "RevenuesNetOfInterestExpense",
+        "HealthCareOrganizationRevenue",
+        "RealEstateRevenueNet", "OilAndGasRevenue",
+    ],
+    "Gross Profit":      ["GrossProfit"],
+    "Operating Income":  ["OperatingIncomeLoss"],
+    "Net Income": [
+        "NetIncomeLoss",
+        "NetIncomeLossAvailableToCommonStockholdersBasic",
+        "ProfitLoss",
+    ],
+    "EPS Diluted":   ["EarningsPerShareDiluted"],
+    "EPS Basic":     ["EarningsPerShareBasic"],
+    "Diluted Shares": [
+        "WeightedAverageNumberOfDilutedSharesOutstanding",
+        "WeightedAverageNumberOfSharesOutstandingBasic",
+    ],
+    # Balance Sheet
+    "Total Assets": ["Assets"],
+    "Cash": [
+        "CashAndCashEquivalentsAtCarryingValue",
+        "CashCashEquivalentsAndShortTermInvestments",
+        "CashAndDueFromBanks",
+    ],
+    "Accounts Receivable": [
+        "AccountsReceivableNetCurrent", "ReceivablesNetCurrent",
+        "AccountsReceivableNet",
+    ],
+    "Inventory":       ["InventoryNet", "InventoryGross"],
+    "Current Assets":  ["AssetsCurrent"],
+    "PP&E Net":        ["PropertyPlantAndEquipmentNet"],
+    "Goodwill":        ["Goodwill"],
+    "Intangibles": [
+        "IntangibleAssetsNetExcludingGoodwill",
+        "FiniteLivedIntangibleAssetsNet",
+    ],
+    "Total Liabilities":   ["Liabilities"],
+    "Current Liabilities": ["LiabilitiesCurrent"],
+    "Long Term Debt": [
+        "LongTermDebt", "LongTermDebtNoncurrent", "LongTermNotesPayable",
+    ],
+    "Total Equity": [
+        "StockholdersEquity",
+        "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
+        "PartnersCapital",
+    ],
+    # Cash Flow Statement
+    "Operating Cash Flow": [
+        "NetCashProvidedByUsedInOperatingActivities",
+        "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations",
+    ],
+    "CapEx": [
+        "PaymentsToAcquirePropertyPlantAndEquipment",
+        "PaymentsForCapitalImprovements",
+        "PaymentsToAcquireProductiveAssets",
+    ],
+    "D&A": [
+        "DepreciationDepletionAndAmortization",
+        "DepreciationAndAmortization",
+        "Depreciation",
+    ],
+    "Share Repurchases": [
+        "PaymentsForRepurchaseOfCommonStock",
+        "TreasuryStockValueAcquiredCostMethod",
+    ],
+    "Dividends Paid": [
+        "PaymentsOfDividendsCommonStock",
+        "PaymentsOfDividends",
+    ],
+}
+
+INCOME_METRICS   = ["Revenue", "Gross Profit", "Operating Income", "Net Income",
+                     "EPS Diluted", "EPS Basic", "Diluted Shares"]
+BALANCE_METRICS  = ["Total Assets", "Cash", "Accounts Receivable", "Inventory",
+                     "Current Assets", "PP&E Net", "Goodwill", "Intangibles",
+                     "Total Liabilities", "Current Liabilities", "Long Term Debt", "Total Equity"]
+CASHFLOW_METRICS = ["Operating Cash Flow", "CapEx", "D&A", "Share Repurchases", "Dividends Paid"]
+DERIVED_METRICS  = ["Gross Margin", "Operating Margin", "Net Margin",
+                     "Revenue Growth", "Net Income Growth",
+                     "FCF", "FCF Margin", "ROA", "ROE",
+                     "Net Debt", "Debt/Equity", "Debt/Assets"]
+ALL_STD_METRICS  = INCOME_METRICS + BALANCE_METRICS + CASHFLOW_METRICS + DERIVED_METRICS
+
+# Display metadata: fmt codes = usd_b | usd_share | shares_b | pct | pct_signed | ratio
+# negate=True  → flip sign before display (CapEx, dividends are stored as positive outflows)
+# key=True     → bold + highlight row in the table
+METRIC_DISPLAY: dict[str, dict] = {
+    "Revenue":             {"fmt": "usd_b",    "key": True},
+    "Gross Profit":        {"fmt": "usd_b"},
+    "Operating Income":    {"fmt": "usd_b"},
+    "Net Income":          {"fmt": "usd_b",    "key": True},
+    "EPS Diluted":         {"fmt": "usd_share"},
+    "EPS Basic":           {"fmt": "usd_share"},
+    "Diluted Shares":      {"fmt": "shares_b"},
+    "Total Assets":        {"fmt": "usd_b",    "key": True},
+    "Cash":                {"fmt": "usd_b"},
+    "Accounts Receivable": {"fmt": "usd_b"},
+    "Inventory":           {"fmt": "usd_b"},
+    "Current Assets":      {"fmt": "usd_b"},
+    "PP&E Net":            {"fmt": "usd_b"},
+    "Goodwill":            {"fmt": "usd_b"},
+    "Intangibles":         {"fmt": "usd_b"},
+    "Total Liabilities":   {"fmt": "usd_b"},
+    "Current Liabilities": {"fmt": "usd_b"},
+    "Long Term Debt":      {"fmt": "usd_b"},
+    "Total Equity":        {"fmt": "usd_b",    "key": True},
+    "Operating Cash Flow": {"fmt": "usd_b",    "key": True},
+    "CapEx":               {"fmt": "usd_b",    "negate": True},
+    "D&A":                 {"fmt": "usd_b"},
+    "Share Repurchases":   {"fmt": "usd_b",    "negate": True},
+    "Dividends Paid":      {"fmt": "usd_b",    "negate": True},
+    "Gross Margin":        {"fmt": "pct"},
+    "Operating Margin":    {"fmt": "pct"},
+    "Net Margin":          {"fmt": "pct"},
+    "Revenue Growth":      {"fmt": "pct_signed"},
+    "Net Income Growth":   {"fmt": "pct_signed"},
+    "FCF":                 {"fmt": "usd_b",    "key": True},
+    "FCF Margin":          {"fmt": "pct"},
+    "ROA":                 {"fmt": "pct"},
+    "ROE":                 {"fmt": "pct"},
+    "Net Debt":            {"fmt": "usd_b"},
+    "Debt/Equity":         {"fmt": "ratio"},
+    "Debt/Assets":         {"fmt": "ratio"},
+}
 
 # ── SEC EDGAR API (all cached) ─────────────────────────────────────────────────
 @st.cache_data(ttl=3_600, show_spinner=False)
@@ -393,6 +528,224 @@ def yaxis_tickformat(unit: str) -> str:
     return ",.2f"
 
 
+# ── Standardized financial statement processing ────────────────────────────────
+def extract_annual_metric(facts: dict, tags: list[str]) -> tuple[pd.Series, str]:
+    """
+    Try each XBRL tag in priority order; return the first with FY-period data.
+    Deduplicates: keeps the most recently filed observation per fiscal year.
+    Returns (Series with int-year index, unit_str), or (empty Series, "").
+    """
+    for tag in tags:
+        for ns in ("us-gaap", "dei"):
+            concept = facts.get("facts", {}).get(ns, {}).get(tag, {})
+            if not concept:
+                continue
+            units    = concept.get("units", {})
+            unit_key = next((u for u in ("USD", "shares", "USD/shares") if u in units), None)
+            if unit_key is None and units:
+                unit_key = next(iter(units))
+            if not unit_key:
+                continue
+
+            rows = []
+            for e in units[unit_key]:
+                fp, form = e.get("fp", ""), e.get("form", "")
+                if fp != "FY" and form not in ("10-K", "10-K/A"):
+                    continue
+                if e.get("end") is None or e.get("val") is None:
+                    continue
+                rows.append({"end": e["end"], "val": float(e["val"]),
+                             "filed": e.get("filed", "")})
+            if not rows:
+                continue
+
+            df = pd.DataFrame(rows)
+            df["end"] = pd.to_datetime(df["end"], errors="coerce")
+            df["val"] = pd.to_numeric(df["val"], errors="coerce")
+            df = df.dropna(subset=["end", "val"])
+
+            # Per period-end: keep the most-recently-filed revision
+            df = df.sort_values(["end", "filed"], ascending=[True, False])
+            df = df.drop_duplicates(subset=["end"], keep="first")
+
+            # Map period-end → calendar year; if two ends fall in same year, keep latest
+            df["year"] = df["end"].dt.year
+            df = df.sort_values(["year", "end"], ascending=[True, False])
+            df = df.drop_duplicates(subset=["year"], keep="first")
+
+            result = df.set_index("year")["val"].sort_index()
+            if not result.empty:
+                return result, unit_key
+
+    return pd.Series(dtype=float), ""
+
+
+def build_financial_statements(facts: dict) -> dict[str, pd.DataFrame]:
+    """
+    Convert raw EDGAR companyfacts into clean standardized annual DataFrames.
+    Implements Stages 1-9 of the standardization pipeline.
+    Returns dict: 'income', 'balance', 'cashflow', 'derived'.
+    Each DataFrame: index = int year newest-first, columns = metric names.
+    """
+    raw: dict[str, pd.Series] = {}
+    for metric, tags in METRIC_TAGS.items():
+        s, _ = extract_annual_metric(facts, tags)
+        raw[metric] = s
+
+    def _df(metrics: list[str]) -> pd.DataFrame:
+        parts = {m: raw[m] for m in metrics if not raw.get(m, pd.Series()).empty}
+        if not parts:
+            return pd.DataFrame()
+        out = pd.DataFrame(parts)
+        out.index.name = "Year"
+        return out.sort_index(ascending=False)   # newest year first
+
+    income   = _df(INCOME_METRICS)
+    balance  = _df(BALANCE_METRICS)
+    cashflow = _df(CASHFLOW_METRICS)
+
+    # ── Derived metrics (Stage 7) ───────────────────────────────────────────
+    def g(m: str) -> pd.Series:
+        return raw.get(m, pd.Series(dtype=float))
+
+    rev = g("Revenue");  gp = g("Gross Profit");  oi = g("Operating Income")
+    ni  = g("Net Income"); ocf = g("Operating Cash Flow"); cx = g("CapEx")
+    ta  = g("Total Assets"); te = g("Total Equity")
+    ltd = g("Long Term Debt"); cas = g("Cash")
+
+    def safe_div(a: pd.Series, b: pd.Series) -> pd.Series:
+        return a.div(b.replace(0, float("nan")))
+
+    drv: dict[str, pd.Series] = {}
+    if not rev.empty and not gp.empty:       drv["Gross Margin"]      = safe_div(gp, rev)
+    if not rev.empty and not oi.empty:       drv["Operating Margin"]  = safe_div(oi, rev)
+    if not rev.empty and not ni.empty:       drv["Net Margin"]        = safe_div(ni, rev)
+    if len(rev) > 1:                         drv["Revenue Growth"]    = rev.sort_index().pct_change()
+    if len(ni) > 1:                          drv["Net Income Growth"] = ni.sort_index().pct_change()
+
+    if not ocf.empty and not cx.empty:
+        aln = pd.concat([ocf, cx], axis=1, keys=["ocf", "cx"]).dropna(how="all")
+        aln["fcf"]   = aln["ocf"] - aln["cx"].abs()   # cx is a positive outflow in XBRL
+        drv["FCF"]   = aln["fcf"]
+        if not rev.empty:
+            drv["FCF Margin"] = safe_div(aln["fcf"], rev)
+
+    if not ni.empty and not ta.empty:    drv["ROA"]        = safe_div(ni, ta)
+    if not ni.empty and not te.empty:    drv["ROE"]        = safe_div(ni, te)
+    if not cas.empty and not ltd.empty:
+        nd = pd.concat([ltd, cas], axis=1, keys=["ltd", "cas"]).dropna(how="all")
+        drv["Net Debt"]   = nd["ltd"].sub(nd["cas"], fill_value=0)
+    if not ltd.empty and not te.empty:   drv["Debt/Equity"] = safe_div(ltd, te)
+    if not ltd.empty and not ta.empty:   drv["Debt/Assets"] = safe_div(ltd, ta)
+
+    if drv:
+        all_yrs = sorted({yr for s in drv.values() for yr in s.index}, reverse=True)
+        derived  = pd.DataFrame(drv, index=all_yrs)
+        derived.index.name = "Year"
+    else:
+        derived = pd.DataFrame()
+
+    return {"income": income, "balance": balance, "cashflow": cashflow, "derived": derived}
+
+
+def fmt_stmt_val(v, fmt: str) -> str:
+    """Format one financial statement cell value for table display."""
+    try:
+        if v is None or pd.isna(v):
+            return "—"
+        v = float(v)
+    except Exception:
+        return "—"
+
+    if fmt == "usd_b":
+        a, neg = abs(v), v < 0
+        s = (f"${a/1e12:.2f}T" if a >= 1e12 else
+             f"${a/1e9:.1f}B"  if a >= 1e9  else
+             f"${a/1e6:.0f}M"  if a >= 1e6  else f"${a:,.0f}")
+        return f"({s})" if neg else s
+    if fmt == "usd_share":  return f"${v:.2f}"
+    if fmt == "shares_b":
+        a = abs(v)
+        return (f"{v/1e9:.2f}B" if a >= 1e9 else
+                f"{v/1e6:.1f}M" if a >= 1e6 else f"{v:,.0f}")
+    if fmt == "pct":        return f"{v * 100:.1f}%"
+    if fmt == "pct_signed": return f"{v * 100:+.1f}%"
+    if fmt == "ratio":      return f"{v:.2f}x"
+    return f"{v:.2f}"
+
+
+def make_stmt_html(df: pd.DataFrame, metric_list: list[str], max_years: int = 11) -> str:
+    """
+    Render a financial statement DataFrame as an HTML table.
+    Rows = metrics (newest at left), Columns = fiscal years.
+    """
+    if df.empty:
+        return "<p style='color:#94a3b8;padding:20px'>No data available.</p>"
+    avail = [m for m in metric_list if m in df.columns]
+    if not avail:
+        return "<p style='color:#94a3b8;padding:20px'>No data found for these metrics.</p>"
+
+    years = list(df.index[:max_years])   # df already newest-first
+
+    yr_heads = "".join(
+        f'<th style="text-align:right;padding:6px 14px;color:#475569;'
+        f'font-weight:600;font-size:12px;white-space:nowrap">{y}</th>'
+        for y in years
+    )
+    header = (
+        '<tr style="background:#f1f5f9;border-bottom:2px solid #cbd5e1">'
+        '<th style="text-align:left;padding:6px 14px;color:#475569;font-weight:600;'
+        'font-size:12px;white-space:nowrap">Metric</th>'
+        + yr_heads + "</tr>"
+    )
+
+    rows_html = []
+    for idx, m in enumerate(avail):
+        meta   = METRIC_DISPLAY.get(m, {"fmt": "usd_b"})
+        fmt    = meta.get("fmt", "usd_b")
+        negate = meta.get("negate", False)
+        is_key = meta.get("key", False)
+
+        cells = []
+        for yr in years:
+            raw_v = df.loc[yr, m] if yr in df.index else None
+            if raw_v is not None and negate:
+                try: raw_v = -float(raw_v)
+                except Exception: pass
+            s = fmt_stmt_val(raw_v, fmt)
+            c = ""
+            if fmt == "pct_signed":
+                c = "color:#059669" if s.startswith("+") else ("color:#dc2626" if not s.startswith("—") else "")
+            elif fmt == "usd_b" and s.startswith("("):
+                c = "color:#dc2626"
+            weight = "font-weight:700;" if is_key else ""
+            cells.append(f'<td style="text-align:right;padding:5px 14px;{c};{weight}">{s}</td>')
+
+        row_bg = "background:#f0f9ff;" if is_key else ("background:#f8fafc;" if idx % 2 == 0 else "")
+        rows_html.append(
+            f'<tr style="{row_bg}">'
+            f'<td style="padding:5px 14px;color:#0f172a;white-space:nowrap;'
+            f'{"font-weight:700;" if is_key else ""}">{m}</td>'
+            + "".join(cells) + "</tr>"
+        )
+
+    return (
+        '<div style="overflow-x:auto;margin-bottom:4px">'
+        '<table style="width:100%;border-collapse:collapse;font-size:13px">'
+        f"<thead>{header}</thead><tbody>{''.join(rows_html)}</tbody>"
+        "</table></div>"
+    )
+
+
+def get_stmt_series(stmts: dict, metric: str) -> pd.Series | None:
+    """Pull a metric's time-series from any statement dict."""
+    for key in ("income", "balance", "cashflow", "derived"):
+        df = stmts.get(key, pd.DataFrame())
+        if not df.empty and metric in df.columns:
+            return df[metric].sort_index()   # ascending for chart
+    return None
+
+
 # ── Filings data helpers ───────────────────────────────────────────────────────
 def period_label(form: str, date_str: str) -> str:
     if not date_str:
@@ -497,6 +850,7 @@ _DEFAULTS = {
     "kpi_tickers":  [],        # list of ticker strings with loaded facts
     "kpi_facts":    {},        # {ticker: facts_dict}
     "kpi_subs":     {},        # {ticker: submissions_dict}  ← company profile info
+    "kpi_stmts":    {},        # {ticker: {"income":df,"balance":df,"cashflow":df,"derived":df}}
     "kpi_concept":  None,      # selected concept path
     "kpi_period":   "annual",
     "kpi_error":    None,
@@ -551,6 +905,7 @@ def run_kpi_load(tickers_raw: str) -> None:
     st.session_state.kpi_error   = None
     st.session_state.kpi_facts   = {}
     st.session_state.kpi_subs    = {}
+    st.session_state.kpi_stmts   = {}
     st.session_state.kpi_tickers = []
     st.session_state.kpi_concept = None   # reset so selector defaults to first
 
@@ -565,9 +920,10 @@ def run_kpi_load(tickers_raw: str) -> None:
             continue
         try:
             facts = load_company_facts(company["cik_str"])
-            sub   = load_submissions(company["cik_str"])   # cached — free if Filings tab already loaded it
+            sub   = load_submissions(company["cik_str"])
             st.session_state.kpi_facts[tk]   = facts
             st.session_state.kpi_subs[tk]    = sub
+            st.session_state.kpi_stmts[tk]   = build_financial_statements(facts)
             st.session_state.kpi_tickers.append(tk)
         except Exception as exc:
             errors.append(f"**{tk}**: {exc}")
@@ -892,6 +1248,7 @@ else:
         load_submissions.clear()
         st.session_state.kpi_facts   = {}
         st.session_state.kpi_subs    = {}
+        st.session_state.kpi_stmts   = {}
         st.session_state.kpi_tickers = []
         st.info("Cache cleared. Click **📊 Load** to fetch fresh data from EDGAR.")
 
@@ -999,331 +1356,532 @@ else:
 
     st.divider()
 
-    # ── Build concept list ────────────────────────────────────────────────────
-    all_concepts   = get_all_concepts(list(kpi_facts.values()))
-    concept_paths  = [p for p, _ in all_concepts]
-    concept_labels = [
-        f"⭐ {lbl}  ·  {p}" if p in POPULAR_KPIS else f"{lbl}  ·  {p}"
-        for p, lbl in all_concepts
-    ]
-
-    # ── Controls row ──────────────────────────────────────────────────────────
-    ctrl1, ctrl2, ctrl3 = st.columns([4, 2, 1.5])
-
-    with ctrl1:
-        default_idx = 0
-        if st.session_state.kpi_concept in concept_paths:
-            default_idx = concept_paths.index(st.session_state.kpi_concept)
-
-        sel_idx = st.selectbox(
-            "KPI",
-            options=range(len(concept_paths)),
-            format_func=lambda i: concept_labels[i],
-            index=default_idx,
-            key="kpi_concept_selector",
-        )
-        st.session_state.kpi_concept = concept_paths[sel_idx]
-
-    with ctrl2:
-        period_type = st.radio(
-            "Period type",
-            options=["annual", "quarterly"],
-            format_func=lambda x: "📅 Annual" if x == "annual" else "📆 Quarterly",
-            index=0 if st.session_state.kpi_period == "annual" else 1,
-            horizontal=True,
-            key="kpi_period_radio",
-        )
-        st.session_state.kpi_period = period_type
-
-    with ctrl3:
-        normalize = st.checkbox(
-            "Index to 100",
-            value=False,
-            key="kpi_normalize",
-            help="Normalize each company to 100 at a chosen base year — useful for relative growth comparison",
-        )
-        show_yoy = st.checkbox(
-            "Show YoY %",
-            value=False,
-            key="kpi_yoy",
-            help="Display Year-over-Year percentage change instead of absolute values",
-        )
-
-    concept_path = st.session_state.kpi_concept
-
-    # ── Gather series data ────────────────────────────────────────────────────
-    series_data: dict[str, pd.DataFrame] = {}
-    unit_str  = ""
-    label_str = ""
-
-    for tk in kpi_tickers:
-        facts = kpi_facts.get(tk)
-        if not facts:
-            continue
-        df, label, unit = get_concept_series(facts, concept_path, period_type)
-        label_str = label   # same concept → same label across companies
-        unit_str  = unit
-        if not df.empty:
-            series_data[tk] = df
-
-    # ── No data fallback ──────────────────────────────────────────────────────
-    if not series_data:
-        period_word = "annual" if period_type == "annual" else "quarterly"
-        st.warning(
-            f"No {period_word} data found for **{concept_path.split('/')[-1]}** "
-            f"in the loaded companies. "
-            "Try switching between Annual / Quarterly, or choose a different KPI."
-        )
-        st.stop()
-
-    # ── Date-range + base-year controls ──────────────────────────────────────
-    all_years = sorted({
-        int(row["date"].year)
-        for df in series_data.values()
-        for _, row in df.iterrows()
-    })
-
-    if len(all_years) >= 2:
-        yr_min, yr_max = all_years[0], all_years[-1]
-
-        # Show year-range slider and optional base-year picker in the same row
-        if normalize:
-            range_col, base_col = st.columns([3, 2])
-        else:
-            range_col, base_col = st.columns([3, 2])   # base_col unused when not normalizing
-
-        with range_col:
-            yr_from, yr_to = st.slider(
-                "Year range",
-                min_value=yr_min,
-                max_value=yr_max,
-                value=(yr_min, yr_max),
-                key="kpi_year_range",
-            )
-
-        base_year = yr_from   # default: first year of the visible range
-        if normalize:
-            with base_col:
-                # Only show years within the selected range
-                base_year = st.select_slider(
-                    "Index base year  (= 100)",
-                    options=list(range(yr_from, yr_to + 1)),
-                    value=yr_from,
-                    key="kpi_base_year",
-                )
-
-        # Apply year-range filter
-        series_data = {
-            tk: df[(df["date"].dt.year >= yr_from) & (df["date"].dt.year <= yr_to)]
-            for tk, df in series_data.items()
-        }
-        series_data = {tk: df for tk, df in series_data.items() if not df.empty}
-    else:
-        base_year = all_years[0] if all_years else None
-
-    if not series_data:
-        st.info("No data in the selected year range.")
-        st.stop()
-
-    # ── Plotly chart ──────────────────────────────────────────────────────────
-    fig = go.Figure()
-    index_warnings: list[str] = []   # collect per-company issues for normalize mode
-
-    for i, (tk, df) in enumerate(series_data.items()):
-        color  = CHART_COLORS[i % len(CHART_COLORS)]
-        y_vals = df["value"].copy().astype(float)
-
-        if normalize:
-            # Find value at the chosen base year (exact match → nearest → first positive)
-            base_rows = df[df["date"].dt.year == base_year]
-            if not base_rows.empty:
-                base_val = float(base_rows.iloc[0]["value"])
-                base_lbl = f"{base_year}"
-            else:
-                # No data at base_year; fall back to first positive value
-                pos = df[df["value"] > 0]
-                if pos.empty:
-                    index_warnings.append(
-                        f"**{tk}**: all values are ≤ 0 — cannot index to 100, shown as-is."
-                    )
-                    base_val = None
-                else:
-                    base_val = float(pos.iloc[0]["value"])
-                    base_lbl = str(int(pos.iloc[0]["date"].year))
-                    index_warnings.append(
-                        f"**{tk}**: no data for {base_year}, indexed from first positive year "
-                        f"({base_lbl} = {fmt_value(base_val, unit_str)})."
-                    )
-
-            if base_val and base_val != 0:
-                y_vals = y_vals / base_val * 100
-            elif base_val == 0:
-                index_warnings.append(f"**{tk}**: value is exactly 0 in {base_year} — cannot index.")
-
-        if show_yoy:
-            pct = y_vals.pct_change() * 100
-            pct.iloc[0] = None   # no prior year for first point
-            y_plot = pct
-        else:
-            y_plot = y_vals
-
-        # Custom hover: always show the raw formatted value
-        custom = df["value"].apply(lambda v: fmt_value(v, unit_str)).tolist()
-
-        if show_yoy:
-            hover = (
-                f"<b>{tk}</b>  YoY: %{{y:.1f}}%<br>"
-                f"Raw: %{{customdata}}<br>"
-                f"Date: %{{x|%Y-%m-%d}}<extra></extra>"
-            )
-        elif normalize:
-            hover = (
-                f"<b>{tk}</b>  Index: %{{y:.1f}}<br>"
-                f"Raw: %{{customdata}}<br>"
-                f"Date: %{{x|%Y-%m-%d}}<extra></extra>"
-            )
-        else:
-            hover = (
-                f"<b>{tk}</b>  %{{customdata}}<br>"
-                f"Date: %{{x|%Y-%m-%d}}<extra></extra>"
-            )
-
-        fig.add_trace(go.Scatter(
-            x=df["date"],
-            y=y_plot,
-            name=tk,
-            mode="lines+markers",
-            line=dict(color=color, width=2.5),
-            marker=dict(size=6, color=color, line=dict(width=1.5, color="white")),
-            customdata=custom,
-            hovertemplate=hover,
-        ))
-
-    # Show index warnings if any
-    if index_warnings:
-        st.info("ℹ️ " + "  \n".join(index_warnings))
-
-    # Y-axis config
-    if show_yoy:
-        ytitle = "YoY Growth (%)"
-        yfmt   = ".1f"
-        ysuf   = "%"
-    elif normalize:
-        ytitle = f"Indexed (base year {base_year} = 100)"
-        yfmt   = ".0f"
-        ysuf   = ""
-    else:
-        ytitle = f"{label_str}  ({unit_str})"
-        yfmt   = yaxis_tickformat(unit_str)
-        ysuf   = ""
-
-    fig.update_layout(
-        title=dict(text=f"<b>{label_str}</b>", font=dict(size=18, color="#0f172a")),
-        xaxis=dict(
-            showgrid=True, gridcolor="#f1f5f9",
-            tickformat="%Y", title="",
-        ),
-        yaxis=dict(
-            title=ytitle, showgrid=True, gridcolor="#f1f5f9",
-            tickformat=yfmt, ticksuffix=ysuf,
-            zeroline=True, zerolinecolor="#cbd5e1", zerolinewidth=1.5,
-        ),
-        legend=dict(
-            orientation="h", yanchor="bottom", y=1.02,
-            xanchor="right", x=1,
-        ),
-        plot_bgcolor="white",
-        paper_bgcolor="white",
-        margin=dict(l=0, r=0, t=56, b=0),
-        height=430,
-        hovermode="x unified",
+    # ── Mode toggle ───────────────────────────────────────────────────────────
+    view_mode = st.radio(
+        "View mode",
+        options=["📊  Standardized Financials", "🔬  Raw KPI Explorer"],
+        horizontal=True,
+        label_visibility="collapsed",
+        key="kpi_view_mode",
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    # ══════════════════════════════════════════════════════════════════════════
+    #  MODE A — STANDARDIZED FINANCIALS
+    # ══════════════════════════════════════════════════════════════════════════
+    if view_mode == "📊  Standardized Financials":
+        kpi_stmts = st.session_state.kpi_stmts
 
-    # ── Data coverage note ────────────────────────────────────────────────────
-    coverage_parts = []
-    for tk, df in series_data.items():
-        if df.empty:
-            continue
-        yr_start = int(df["date"].dt.year.min())
-        yr_end   = int(df["date"].dt.year.max())
-        n        = len(df)
-        coverage_parts.append(f"**{tk}** {yr_start}–{yr_end} ({n} pts)")
-    if coverage_parts:
-        st.caption(
-            "📅 Data coverage for this KPI:  " + "  ·  ".join(coverage_parts)
-            + "  —  Missing recent years? Click **🔄 Refresh** above to fetch latest EDGAR data."
-        )
+        # Company selector when multiple loaded
+        if len(kpi_tickers) > 1:
+            sel_co = st.selectbox(
+                "Company to view",
+                options=kpi_tickers,
+                key="kpi_std_company",
+            )
+        else:
+            sel_co = kpi_tickers[0]
 
-    # ── Metric cards (one per company) ────────────────────────────────────────
-    if not show_yoy and not normalize and series_data:
-        st.markdown("---")
-        st.markdown("#### 📊 Key Metrics")
+        stmts = kpi_stmts.get(sel_co, {})
 
-        metric_cols = st.columns(max(len(series_data), 1))
-        for i, (tk, df) in enumerate(series_data.items()):
-            cagr_all = calc_cagr(df)
-            cagr_5y  = calc_cagr(df, 5)
-            cagr_3y  = calc_cagr(df, 3)
-            latest   = float(df.iloc[-1]["value"]) if not df.empty else None
-            latest_y = int(df.iloc[-1]["date"].year) if not df.empty else "—"
-            n_pts    = len(df)
+        # ── Statement tabs ────────────────────────────────────────────────────
+        tab_is, tab_bs, tab_cf, tab_drv, tab_cmp = st.tabs([
+            "📈 Income Statement",
+            "🏦 Balance Sheet",
+            "💵 Cash Flow",
+            "📐 Derived Metrics",
+            "🔀 Compare Companies",
+        ])
 
-            cagr_all_str = f"{cagr_all*100:+.1f}%" if cagr_all is not None else "N/A"
-            cagr_5y_str  = f"{cagr_5y*100:+.1f}%"  if cagr_5y  is not None else "N/A"
-            cagr_3y_str  = f"{cagr_3y*100:+.1f}%"  if cagr_3y  is not None else "N/A"
+        def _stmt_tab(tab, df: pd.DataFrame, metric_list: list[str],
+                      tab_key: str, chart_title: str) -> None:
+            """Render one statement tab: HTML table + optional chart."""
+            with tab:
+                st.markdown(make_stmt_html(df, metric_list), unsafe_allow_html=True)
 
-            card_cls = ""
-            if cagr_all is not None:
-                card_cls = "kpi-card-green" if cagr_all >= 0 else "kpi-card-red"
+                avail = [m for m in metric_list if not df.empty and m in df.columns]
+                if not avail:
+                    return
 
-            with metric_cols[i]:
-                st.markdown(
-                    f"<div class='kpi-card {card_cls}'>"
-                    f"<div class='kpi-label'>{tk}</div>"
-                    f"<div class='kpi-value'>{fmt_value(latest, unit_str)}</div>"
-                    f"<div class='kpi-sub'>Latest ({latest_y}) · {n_pts} data points</div>"
-                    f"</div>",
-                    unsafe_allow_html=True,
+                st.markdown("---")
+                chart_col, _ = st.columns([3, 2])
+                with chart_col:
+                    chart_m = st.selectbox(
+                        "Chart metric",
+                        options=avail,
+                        key=f"kpi_chart_{tab_key}",
+                    )
+
+                # Build chart for selected metric across ALL loaded companies
+                fig = go.Figure()
+                for ci, tk in enumerate(kpi_tickers):
+                    s = get_stmt_series(kpi_stmts.get(tk, {}), chart_m)
+                    if s is None or s.empty:
+                        continue
+                    meta  = METRIC_DISPLAY.get(chart_m, {"fmt": "usd_b"})
+                    negate = meta.get("negate", False)
+                    y = -s.astype(float) if negate else s.astype(float)
+                    fmt  = meta.get("fmt", "usd_b")
+                    hover_vals = [fmt_stmt_val(v, fmt) for v in (y if not negate else s)]
+                    color = CHART_COLORS[ci % len(CHART_COLORS)]
+                    fig.add_trace(go.Scatter(
+                        x=s.index.astype(str),
+                        y=y,
+                        name=tk,
+                        mode="lines+markers",
+                        line=dict(color=color, width=2.5),
+                        marker=dict(size=6, color=color,
+                                    line=dict(width=1.5, color="white")),
+                        customdata=hover_vals,
+                        hovertemplate=(
+                            f"<b>{tk}</b>  %{{customdata}}<br>"
+                            "Year: %{x}<extra></extra>"
+                        ),
+                    ))
+                fig.update_layout(
+                    title=dict(text=f"<b>{chart_m}</b>",
+                               font=dict(size=16, color="#0f172a")),
+                    xaxis=dict(showgrid=True, gridcolor="#f1f5f9",
+                               title="Fiscal Year"),
+                    yaxis=dict(showgrid=True, gridcolor="#f1f5f9",
+                               tickformat=yaxis_tickformat(
+                                   "USD" if "usd" in meta.get("fmt","") else
+                                   "shares" if "shares" in meta.get("fmt","") else ""
+                               )),
+                    legend=dict(orientation="h", yanchor="bottom",
+                                y=1.02, xanchor="right", x=1),
+                    plot_bgcolor="white", paper_bgcolor="white",
+                    margin=dict(l=0, r=0, t=50, b=0), height=370,
                 )
-                m1, m2, m3 = st.columns(3)
-                m1.metric("CAGR (all)", cagr_all_str)
-                m2.metric("CAGR (5Y)",  cagr_5y_str)
-                m3.metric("CAGR (3Y)",  cagr_3y_str)
+                st.plotly_chart(fig, use_container_width=True)
 
-    # ── Data table with YoY ───────────────────────────────────────────────────
-    st.markdown("---")
-    st.markdown("#### 📋 Data Table")
+                # CSV export
+                if not df.empty:
+                    avail_df = df[[m for m in metric_list if m in df.columns]]
+                    csv = avail_df.to_csv().encode("utf-8")
+                    st.download_button(
+                        f"⬇ Download {chart_title} CSV",
+                        data=csv,
+                        file_name=f"{sel_co}_{tab_key}.csv",
+                        mime="text/csv",
+                        key=f"dl_{tab_key}",
+                    )
 
-    table_parts = []
-    for tk, df in series_data.items():
-        tdf = df[["date", "value"]].copy()
-        tdf["Ticker"]  = tk
-        tdf["Year"]    = tdf["date"].dt.year.astype(int)
-        tdf["YoY %"]   = tdf["value"].pct_change() * 100
-        tdf["Value"]   = tdf["value"].apply(lambda v: fmt_value(v, unit_str))
-        tdf["YoY %"]   = tdf["YoY %"].apply(
-            lambda v: f"{v:+.1f}%" if pd.notna(v) else "—"
+        _stmt_tab(tab_is,  stmts.get("income",   pd.DataFrame()),
+                  INCOME_METRICS,   "income",   "Income Statement")
+        _stmt_tab(tab_bs,  stmts.get("balance",  pd.DataFrame()),
+                  BALANCE_METRICS,  "balance",  "Balance Sheet")
+        _stmt_tab(tab_cf,  stmts.get("cashflow", pd.DataFrame()),
+                  CASHFLOW_METRICS, "cashflow", "Cash Flow Statement")
+        _stmt_tab(tab_drv, stmts.get("derived",  pd.DataFrame()),
+                  DERIVED_METRICS,  "derived",  "Derived Metrics")
+
+        # ── Compare Companies tab ─────────────────────────────────────────────
+        with tab_cmp:
+            if len(kpi_tickers) < 2:
+                st.info(
+                    "Load two or more companies to compare them here.  \n"
+                    "Example: type **AAPL, MSFT, GOOGL** and click 📊 Load."
+                )
+            else:
+                cmp_metric = st.selectbox(
+                    "Metric to compare",
+                    options=ALL_STD_METRICS,
+                    key="kpi_cmp_metric",
+                )
+
+                # Gather series from each company
+                cmp_series: dict[str, pd.Series] = {}
+                for tk in kpi_tickers:
+                    s = get_stmt_series(kpi_stmts.get(tk, {}), cmp_metric)
+                    if s is not None and not s.empty:
+                        cmp_series[tk] = s
+
+                if not cmp_series:
+                    st.warning(f"No data found for **{cmp_metric}** in any loaded company.")
+                else:
+                    meta   = METRIC_DISPLAY.get(cmp_metric, {"fmt": "usd_b"})
+                    negate = meta.get("negate", False)
+                    fmt    = meta.get("fmt", "usd_b")
+
+                    # Chart
+                    fig2 = go.Figure()
+                    for ci, (tk, s) in enumerate(cmp_series.items()):
+                        y = -s.astype(float) if negate else s.astype(float)
+                        hover_vals = [fmt_stmt_val(v, fmt) for v in y]
+                        color = CHART_COLORS[ci % len(CHART_COLORS)]
+                        fig2.add_trace(go.Scatter(
+                            x=s.index.astype(str), y=y, name=tk,
+                            mode="lines+markers",
+                            line=dict(color=color, width=2.5),
+                            marker=dict(size=6, color=color,
+                                        line=dict(width=1.5, color="white")),
+                            customdata=hover_vals,
+                            hovertemplate=(
+                                f"<b>{tk}</b>  %{{customdata}}<br>"
+                                "Year: %{x}<extra></extra>"
+                            ),
+                        ))
+                    fig2.update_layout(
+                        title=dict(text=f"<b>{cmp_metric}</b> — Multi-Company",
+                                   font=dict(size=16, color="#0f172a")),
+                        xaxis=dict(showgrid=True, gridcolor="#f1f5f9",
+                                   title="Fiscal Year"),
+                        yaxis=dict(showgrid=True, gridcolor="#f1f5f9"),
+                        legend=dict(orientation="h", yanchor="bottom",
+                                    y=1.02, xanchor="right", x=1),
+                        plot_bgcolor="white", paper_bgcolor="white",
+                        margin=dict(l=0, r=0, t=50, b=0), height=380,
+                        hovermode="x unified",
+                    )
+                    st.plotly_chart(fig2, use_container_width=True)
+
+                    # Side-by-side table
+                    cmp_table = pd.DataFrame(
+                        {tk: s.apply(lambda v: fmt_stmt_val(
+                            (-v if negate else v), fmt))
+                         for tk, s in cmp_series.items()}
+                    ).sort_index(ascending=False)
+                    cmp_table.index.name = "Year"
+                    st.dataframe(cmp_table, use_container_width=True)
+
+                    csv2 = pd.DataFrame(cmp_series).sort_index(ascending=False).to_csv().encode("utf-8")
+                    st.download_button(
+                        "⬇ Download comparison CSV",
+                        data=csv2,
+                        file_name=f"{'_'.join(kpi_tickers)}_{cmp_metric.replace('/','-')}.csv",
+                        mime="text/csv",
+                        key="dl_cmp",
+                    )
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  MODE B — RAW KPI EXPLORER
+    # ══════════════════════════════════════════════════════════════════════════
+    else:
+        # ── Build concept list ────────────────────────────────────────────────
+        all_concepts   = get_all_concepts(list(kpi_facts.values()))
+        concept_paths  = [p for p, _ in all_concepts]
+        concept_labels = [
+            f"⭐ {lbl}  ·  {p}" if p in POPULAR_KPIS else f"{lbl}  ·  {p}"
+            for p, lbl in all_concepts
+        ]
+
+        # ── Controls row ──────────────────────────────────────────────────────────
+        ctrl1, ctrl2, ctrl3 = st.columns([4, 2, 1.5])
+
+        with ctrl1:
+            default_idx = 0
+            if st.session_state.kpi_concept in concept_paths:
+                default_idx = concept_paths.index(st.session_state.kpi_concept)
+
+            sel_idx = st.selectbox(
+                "KPI",
+                options=range(len(concept_paths)),
+                format_func=lambda i: concept_labels[i],
+                index=default_idx,
+                key="kpi_concept_selector",
+            )
+            st.session_state.kpi_concept = concept_paths[sel_idx]
+
+        with ctrl2:
+            period_type = st.radio(
+                "Period type",
+                options=["annual", "quarterly"],
+                format_func=lambda x: "📅 Annual" if x == "annual" else "📆 Quarterly",
+                index=0 if st.session_state.kpi_period == "annual" else 1,
+                horizontal=True,
+                key="kpi_period_radio",
+            )
+            st.session_state.kpi_period = period_type
+
+        with ctrl3:
+            normalize = st.checkbox(
+                "Index to 100",
+                value=False,
+                key="kpi_normalize",
+                help="Normalize each company to 100 at a chosen base year — useful for relative growth comparison",
+            )
+            show_yoy = st.checkbox(
+                "Show YoY %",
+                value=False,
+                key="kpi_yoy",
+                help="Display Year-over-Year percentage change instead of absolute values",
+            )
+
+        concept_path = st.session_state.kpi_concept
+
+        # ── Gather series data ────────────────────────────────────────────────────
+        series_data: dict[str, pd.DataFrame] = {}
+        unit_str  = ""
+        label_str = ""
+
+        for tk in kpi_tickers:
+            facts = kpi_facts.get(tk)
+            if not facts:
+                continue
+            df, label, unit = get_concept_series(facts, concept_path, period_type)
+            label_str = label   # same concept → same label across companies
+            unit_str  = unit
+            if not df.empty:
+                series_data[tk] = df
+
+        # ── No data fallback ──────────────────────────────────────────────────────
+        if not series_data:
+            period_word = "annual" if period_type == "annual" else "quarterly"
+            st.warning(
+                f"No {period_word} data found for **{concept_path.split('/')[-1]}** "
+                f"in the loaded companies. "
+                "Try switching between Annual / Quarterly, or choose a different KPI."
+            )
+            st.stop()
+
+        # ── Date-range + base-year controls ──────────────────────────────────────
+        all_years = sorted({
+            int(row["date"].year)
+            for df in series_data.values()
+            for _, row in df.iterrows()
+        })
+
+        if len(all_years) >= 2:
+            yr_min, yr_max = all_years[0], all_years[-1]
+
+            # Show year-range slider and optional base-year picker in the same row
+            if normalize:
+                range_col, base_col = st.columns([3, 2])
+            else:
+                range_col, base_col = st.columns([3, 2])   # base_col unused when not normalizing
+
+            with range_col:
+                yr_from, yr_to = st.slider(
+                    "Year range",
+                    min_value=yr_min,
+                    max_value=yr_max,
+                    value=(yr_min, yr_max),
+                    key="kpi_year_range",
+                )
+
+            base_year = yr_from   # default: first year of the visible range
+            if normalize:
+                with base_col:
+                    # Only show years within the selected range
+                    base_year = st.select_slider(
+                        "Index base year  (= 100)",
+                        options=list(range(yr_from, yr_to + 1)),
+                        value=yr_from,
+                        key="kpi_base_year",
+                    )
+
+            # Apply year-range filter
+            series_data = {
+                tk: df[(df["date"].dt.year >= yr_from) & (df["date"].dt.year <= yr_to)]
+                for tk, df in series_data.items()
+            }
+            series_data = {tk: df for tk, df in series_data.items() if not df.empty}
+        else:
+            base_year = all_years[0] if all_years else None
+
+        if not series_data:
+            st.info("No data in the selected year range.")
+            st.stop()
+
+        # ── Plotly chart ──────────────────────────────────────────────────────────
+        fig = go.Figure()
+        index_warnings: list[str] = []   # collect per-company issues for normalize mode
+
+        for i, (tk, df) in enumerate(series_data.items()):
+            color  = CHART_COLORS[i % len(CHART_COLORS)]
+            y_vals = df["value"].copy().astype(float)
+
+            if normalize:
+                # Find value at the chosen base year (exact match → nearest → first positive)
+                base_rows = df[df["date"].dt.year == base_year]
+                if not base_rows.empty:
+                    base_val = float(base_rows.iloc[0]["value"])
+                    base_lbl = f"{base_year}"
+                else:
+                    # No data at base_year; fall back to first positive value
+                    pos = df[df["value"] > 0]
+                    if pos.empty:
+                        index_warnings.append(
+                            f"**{tk}**: all values are ≤ 0 — cannot index to 100, shown as-is."
+                        )
+                        base_val = None
+                    else:
+                        base_val = float(pos.iloc[0]["value"])
+                        base_lbl = str(int(pos.iloc[0]["date"].year))
+                        index_warnings.append(
+                            f"**{tk}**: no data for {base_year}, indexed from first positive year "
+                            f"({base_lbl} = {fmt_value(base_val, unit_str)})."
+                        )
+
+                if base_val and base_val != 0:
+                    y_vals = y_vals / base_val * 100
+                elif base_val == 0:
+                    index_warnings.append(f"**{tk}**: value is exactly 0 in {base_year} — cannot index.")
+
+            if show_yoy:
+                pct = y_vals.pct_change() * 100
+                pct.iloc[0] = None   # no prior year for first point
+                y_plot = pct
+            else:
+                y_plot = y_vals
+
+            # Custom hover: always show the raw formatted value
+            custom = df["value"].apply(lambda v: fmt_value(v, unit_str)).tolist()
+
+            if show_yoy:
+                hover = (
+                    f"<b>{tk}</b>  YoY: %{{y:.1f}}%<br>"
+                    f"Raw: %{{customdata}}<br>"
+                    f"Date: %{{x|%Y-%m-%d}}<extra></extra>"
+                )
+            elif normalize:
+                hover = (
+                    f"<b>{tk}</b>  Index: %{{y:.1f}}<br>"
+                    f"Raw: %{{customdata}}<br>"
+                    f"Date: %{{x|%Y-%m-%d}}<extra></extra>"
+                )
+            else:
+                hover = (
+                    f"<b>{tk}</b>  %{{customdata}}<br>"
+                    f"Date: %{{x|%Y-%m-%d}}<extra></extra>"
+                )
+
+            fig.add_trace(go.Scatter(
+                x=df["date"],
+                y=y_plot,
+                name=tk,
+                mode="lines+markers",
+                line=dict(color=color, width=2.5),
+                marker=dict(size=6, color=color, line=dict(width=1.5, color="white")),
+                customdata=custom,
+                hovertemplate=hover,
+            ))
+
+        # Show index warnings if any
+        if index_warnings:
+            st.info("ℹ️ " + "  \n".join(index_warnings))
+
+        # Y-axis config
+        if show_yoy:
+            ytitle = "YoY Growth (%)"
+            yfmt   = ".1f"
+            ysuf   = "%"
+        elif normalize:
+            ytitle = f"Indexed (base year {base_year} = 100)"
+            yfmt   = ".0f"
+            ysuf   = ""
+        else:
+            ytitle = f"{label_str}  ({unit_str})"
+            yfmt   = yaxis_tickformat(unit_str)
+            ysuf   = ""
+
+        fig.update_layout(
+            title=dict(text=f"<b>{label_str}</b>", font=dict(size=18, color="#0f172a")),
+            xaxis=dict(
+                showgrid=True, gridcolor="#f1f5f9",
+                tickformat="%Y", title="",
+            ),
+            yaxis=dict(
+                title=ytitle, showgrid=True, gridcolor="#f1f5f9",
+                tickformat=yfmt, ticksuffix=ysuf,
+                zeroline=True, zerolinecolor="#cbd5e1", zerolinewidth=1.5,
+            ),
+            legend=dict(
+                orientation="h", yanchor="bottom", y=1.02,
+                xanchor="right", x=1,
+            ),
+            plot_bgcolor="white",
+            paper_bgcolor="white",
+            margin=dict(l=0, r=0, t=56, b=0),
+            height=430,
+            hovermode="x unified",
         )
-        table_parts.append(tdf[["Ticker", "Year", "Value", "YoY %"]])
 
-    if table_parts:
-        combined = pd.concat(table_parts, ignore_index=True)
-        combined = combined.sort_values(["Ticker", "Year"], ascending=[True, False])
+        st.plotly_chart(fig, use_container_width=True)
 
-        st.dataframe(
-            combined,
-            use_container_width=True,
-            hide_index=True,
-            height=max(200, min(600, 40 + 35 * len(combined))),
-        )
+        # ── Data coverage note ────────────────────────────────────────────────────
+        coverage_parts = []
+        for tk, df in series_data.items():
+            if df.empty:
+                continue
+            yr_start = int(df["date"].dt.year.min())
+            yr_end   = int(df["date"].dt.year.max())
+            n        = len(df)
+            coverage_parts.append(f"**{tk}** {yr_start}–{yr_end} ({n} pts)")
+        if coverage_parts:
+            st.caption(
+                "📅 Data coverage for this KPI:  " + "  ·  ".join(coverage_parts)
+                + "  —  Missing recent years? Click **🔄 Refresh** above to fetch latest EDGAR data."
+            )
 
-        csv_bytes = combined.to_csv(index=False).encode("utf-8")
-        safe_concept = concept_path.replace("/", "_").replace(" ", "_")
-        st.download_button(
-            "⬇ Download table as CSV",
-            data=csv_bytes,
-            file_name=f"{'_'.join(kpi_tickers)}_{safe_concept}.csv",
-            mime="text/csv",
-        )
+        # ── Metric cards (one per company) ────────────────────────────────────────
+        if not show_yoy and not normalize and series_data:
+            st.markdown("---")
+            st.markdown("#### 📊 Key Metrics")
+
+            metric_cols = st.columns(max(len(series_data), 1))
+            for i, (tk, df) in enumerate(series_data.items()):
+                cagr_all = calc_cagr(df)
+                cagr_5y  = calc_cagr(df, 5)
+                cagr_3y  = calc_cagr(df, 3)
+                latest   = float(df.iloc[-1]["value"]) if not df.empty else None
+                latest_y = int(df.iloc[-1]["date"].year) if not df.empty else "—"
+                n_pts    = len(df)
+
+                cagr_all_str = f"{cagr_all*100:+.1f}%" if cagr_all is not None else "N/A"
+                cagr_5y_str  = f"{cagr_5y*100:+.1f}%"  if cagr_5y  is not None else "N/A"
+                cagr_3y_str  = f"{cagr_3y*100:+.1f}%"  if cagr_3y  is not None else "N/A"
+
+                card_cls = ""
+                if cagr_all is not None:
+                    card_cls = "kpi-card-green" if cagr_all >= 0 else "kpi-card-red"
+
+                with metric_cols[i]:
+                    st.markdown(
+                        f"<div class='kpi-card {card_cls}'>"
+                        f"<div class='kpi-label'>{tk}</div>"
+                        f"<div class='kpi-value'>{fmt_value(latest, unit_str)}</div>"
+                        f"<div class='kpi-sub'>Latest ({latest_y}) · {n_pts} data points</div>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("CAGR (all)", cagr_all_str)
+                    m2.metric("CAGR (5Y)",  cagr_5y_str)
+                    m3.metric("CAGR (3Y)",  cagr_3y_str)
+
+        # ── Data table with YoY ───────────────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("#### 📋 Data Table")
+
+        table_parts = []
+        for tk, df in series_data.items():
+            tdf = df[["date", "value"]].copy()
+            tdf["Ticker"]  = tk
+            tdf["Year"]    = tdf["date"].dt.year.astype(int)
+            tdf["YoY %"]   = tdf["value"].pct_change() * 100
+            tdf["Value"]   = tdf["value"].apply(lambda v: fmt_value(v, unit_str))
+            tdf["YoY %"]   = tdf["YoY %"].apply(
+                lambda v: f"{v:+.1f}%" if pd.notna(v) else "—"
+            )
+            table_parts.append(tdf[["Ticker", "Year", "Value", "YoY %"]])
+
+        if table_parts:
+            combined = pd.concat(table_parts, ignore_index=True)
+            combined = combined.sort_values(["Ticker", "Year"], ascending=[True, False])
+
+            st.dataframe(
+                combined,
+                use_container_width=True,
+                hide_index=True,
+                height=max(200, min(600, 40 + 35 * len(combined))),
+            )
+
+            csv_bytes = combined.to_csv(index=False).encode("utf-8")
+            safe_concept = concept_path.replace("/", "_").replace(" ", "_")
+            st.download_button(
+                "⬇ Download table as CSV",
+                data=csv_bytes,
+                file_name=f"{'_'.join(kpi_tickers)}_{safe_concept}.csv",
+                mime="text/csv",
+            )
