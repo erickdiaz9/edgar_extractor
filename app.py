@@ -808,88 +808,88 @@ def compute_price_metrics(stmts: dict, prices: dict) -> None:
     if not stmts:
         return
 
-    # ── Convert everything to plain Python {int_year: float_value} dicts ─────
-    # This completely sidesteps pandas int32/int64 index alignment bugs.
-    def to_pydict(s: pd.Series | None) -> dict[int, float]:
+    def to_s64(m: str) -> pd.Series:
+        """Return a metric as pd.Series with guaranteed int64 index, NaN-cleaned."""
+        s = get_stmt_series(stmts, m)
         if s is None or (hasattr(s, "empty") and s.empty):
-            return {}
-        return {
-            int(k): float(v)
-            for k, v in s.items()
-            if v is not None and not (isinstance(v, float) and v != v)  # skip NaN
-        }
+            return pd.Series(dtype=float)
+        # Use explicit dict rebuild with int() keys to guarantee Python int → int64
+        return pd.Series(
+            {int(k): float(v) for k, v in s.items() if pd.notna(v)},
+            dtype=float,
+        )
 
-    def gs_dict(m: str) -> dict[int, float]:
-        return to_pydict(get_stmt_series(stmts, m))
+    def _yr(s: pd.Series, extra: str = "") -> str:
+        s2 = s.dropna()
+        if s2.empty:
+            return "❌ not found"
+        lo, hi = int(s2.index.min()), int(s2.index.max())
+        return f"✅ {len(s2)} yrs ({lo}–{hi}){extra}"
 
-    px  = to_pydict(pd.Series({int(k): float(v) for k, v in prices.items()}))
-    sh  = gs_dict("Diluted Shares")
-    te  = gs_dict("Total Equity")
-    div = gs_dict("Dividends Paid")
-    eps = gs_dict("EPS Diluted")
+    # ── Build all input Series with guaranteed int64 index ────────────────────
+    px  = pd.Series({int(k): float(v) for k, v in prices.items()}, dtype=float)
+    sh  = to_s64("Diluted Shares")
+    te  = to_s64("Total Equity")
+    div = to_s64("Dividends Paid")
+    eps = to_s64("EPS Diluted")
+    ni  = to_s64("Net Income")
 
-    # EPS fallback: Net Income / Diluted Shares
-    if not eps and sh:
-        ni = gs_dict("Net Income")
-        eps = {
-            yr: ni[yr] / sh[yr]
-            for yr in set(ni) & set(sh)
-            if sh[yr] != 0 and ni.get(yr) is not None
-        }
+    # EPS fallback: Net Income / Diluted Shares (when direct tag not available)
+    computed_eps = False
+    if eps.empty and not sh.empty and not ni.empty:
+        eps = ni.div(sh.replace(0, float("nan"))).dropna()
+        computed_eps = True
 
-    def _yr(d: dict, label: str = "") -> str:
-        if not d: return "❌ not found"
-        yrs = sorted(d)
-        return f"✅ {len(d)} yrs ({yrs[0]}–{yrs[-1]})"
-
-    debug["prices"]        = _yr(px)
-    debug["Diluted Shares"]= _yr(sh)
-    debug["EPS Diluted"]   = _yr(eps) + (" [computed]" if eps and not gs_dict("EPS Diluted") else "")
-    debug["Total Equity"]  = _yr(te)
-    debug["Dividends Paid"]= _yr(div)
+    debug["prices"]         = _yr(px)
+    debug["Diluted Shares"] = _yr(sh)
+    debug["EPS Diluted"]    = _yr(eps, " [computed]" if computed_eps else "")
+    debug["Total Equity"]   = _yr(te)
+    debug["Dividends Paid"] = _yr(div)
 
     new: dict[str, pd.Series] = {}
 
-    def make_series(d: dict) -> pd.Series:
-        return pd.Series(d, dtype=float).sort_index() if d else pd.Series(dtype=float)
-
-    # Market Cap = Price × Shares
-    mc_d = {yr: px[yr] * sh[yr] for yr in set(px) & set(sh)}
-    if mc_d:
-        new["Market Cap"] = make_series(mc_d)
-        debug["Market Cap"] = f"✅ {len(mc_d)} yrs"
+    # Market Cap = Price × Shares  (pandas aligns on int64 index automatically)
+    mc = px.mul(sh).dropna()
+    if not mc.empty:
+        new["Market Cap"] = mc
+        debug["Market Cap"] = f"✅ {len(mc)} yrs ({int(mc.index.min())}–{int(mc.index.max())})"
     else:
         debug["Market Cap"] = "❌ needs Diluted Shares"
 
-    # P/E Ratio = Price / EPS (positive only)
-    pe_d = {yr: px[yr] / eps[yr] for yr in set(px) & set(eps) if eps.get(yr, 0) > 0 and px[yr] / eps[yr] > 0}
-    if pe_d:
-        new["P/E Ratio"] = make_series(pe_d)
-        debug["P/E Ratio"] = f"✅ {len(pe_d)} yrs"
+    # P/E Ratio = Price / EPS  (keep only positive, sensible values)
+    if not eps.empty:
+        pe = px.div(eps.replace(0, float("nan"))).dropna()
+        pe = pe[pe > 0]
+        if not pe.empty:
+            new["P/E Ratio"] = pe
+            debug["P/E Ratio"] = f"✅ {len(pe)} yrs ({int(pe.index.min())}–{int(pe.index.max())})"
+        else:
+            debug["P/E Ratio"] = "❌ no positive P/E values found"
     else:
         debug["P/E Ratio"] = "❌ needs EPS Diluted"
 
-    # Price/Book = (Price × Shares) / Total Equity (positive only)
-    pb_d = {
-        yr: (px[yr] * sh[yr]) / te[yr]
-        for yr in set(px) & set(sh) & set(te)
-        if te.get(yr, 0) != 0 and (px[yr] * sh[yr]) / te[yr] > 0
-    }
-    if pb_d:
-        new["Price/Book"] = make_series(pb_d)
-        debug["Price/Book"] = f"✅ {len(pb_d)} yrs"
+    # Price/Book = Market Cap / Total Equity  (positive only)
+    if not mc.empty and not te.empty:
+        pb = mc.div(te.replace(0, float("nan"))).dropna()
+        pb = pb[pb > 0]
+        if not pb.empty:
+            new["Price/Book"] = pb
+            debug["Price/Book"] = f"✅ {len(pb)} yrs ({int(pb.index.min())}–{int(pb.index.max())})"
+        else:
+            debug["Price/Book"] = "❌ no positive P/B values found"
     else:
         debug["Price/Book"] = "❌ needs Diluted Shares + Total Equity"
 
-    # Dividend Yield = (Dividends Paid / Shares) / Price
-    dy_d = {
-        yr: (div[yr] / sh[yr]) / px[yr]
-        for yr in set(px) & set(sh) & set(div)
-        if sh.get(yr, 0) != 0 and px.get(yr, 0) != 0 and (div[yr] / sh[yr]) / px[yr] >= 0
-    }
-    if dy_d:
-        new["Dividend Yield"] = make_series(dy_d)
-        debug["Dividend Yield"] = f"✅ {len(dy_d)} yrs"
+    # Dividend Yield = (Dividends Paid / Shares) / Price  (non-negative)
+    if not div.empty and not sh.empty:
+        dps = div.div(sh.replace(0, float("nan")))          # dividends per share
+        dy  = dps.div(px.replace(0, float("nan"))).dropna()
+        dy  = dy[dy >= 0]
+        if not dy.empty:
+            new["Dividend Yield"] = dy
+            debug["Dividend Yield"] = f"✅ {len(dy)} yrs ({int(dy.index.min())}–{int(dy.index.max())})"
+        else:
+            debug["Dividend Yield"] = "❌ no non-negative yield values found"
     else:
         debug["Dividend Yield"] = "❌ needs Dividends Paid + Diluted Shares"
 
@@ -898,12 +898,18 @@ def compute_price_metrics(stmts: dict, prices: dict) -> None:
     if not new:
         return
 
+    # Build new_df with int64 index
     new_df = pd.DataFrame(new).sort_index(ascending=False)
+
+    # Merge with existing derived DataFrame, ensuring matching int64 indices
     drv = stmts.get("derived", pd.DataFrame())
     if drv.empty:
         stmts["derived"] = new_df
     else:
-        combined = pd.concat([drv, new_df], axis=1)
+        # Cast drv.index to int64 to match new_df (XBRL yields int32; price data int64)
+        drv_64 = drv.copy()
+        drv_64.index = drv_64.index.astype("int64")
+        combined = pd.concat([drv_64, new_df], axis=1)
         stmts["derived"] = combined.sort_index(ascending=False)
 
 
