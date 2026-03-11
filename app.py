@@ -549,8 +549,7 @@ def extract_annual_metric(facts: dict, tags: list[str]) -> tuple[pd.Series, str]
 
             rows = []
             for e in units[unit_key]:
-                fp, form = e.get("fp", ""), e.get("form", "")
-                if fp != "FY" and form not in ("10-K", "10-K/A"):
+                if e.get("fp", "") != "FY":
                     continue
                 if e.get("end") is None or e.get("val") is None:
                     continue
@@ -1382,6 +1381,13 @@ else:
             sel_co = kpi_tickers[0]
 
         stmts = kpi_stmts.get(sel_co, {})
+
+        if not stmts:
+            st.warning(
+                f"No standardized data built for **{sel_co}**. "
+                "Click **📊 Load** above to (re-)load the company."
+            )
+            st.stop()
 
         # ── Statement tabs ────────────────────────────────────────────────────
         tab_is, tab_bs, tab_cf, tab_drv, tab_cmp = st.tabs([
