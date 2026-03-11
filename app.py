@@ -826,10 +826,17 @@ def compute_price_metrics(stmts: dict, prices: dict) -> None:
     te  = gs("Total Equity")
     div = gs("Dividends Paid")
 
-    debug["Diluted Shares"] = f"✅ {len(sh)} yrs" if not sh.empty else "❌ not found in XBRL"
-    debug["EPS Diluted"]    = f"✅ {len(eps)} yrs" if not eps.empty else "❌ not found in XBRL"
-    debug["Total Equity"]   = f"✅ {len(te)} yrs"  if not te.empty  else "❌ not found in XBRL"
-    debug["Dividends Paid"] = f"✅ {len(div)} yrs" if not div.empty else "❌ not found (company may not pay dividends)"
+    def _dbg_series(s: pd.Series, label: str) -> str:
+        if s.empty:
+            return "❌ not found in XBRL"
+        yrs = sorted(s.index.tolist())
+        return f"✅ {len(s)} yrs | index dtype={s.index.dtype} | range={yrs[0]}–{yrs[-1]} | years={yrs[:5]}{'...' if len(yrs)>5 else ''}"
+
+    debug["Diluted Shares"] = _dbg_series(sh,  "Diluted Shares")
+    debug["EPS Diluted"]    = _dbg_series(eps, "EPS Diluted") if not eps.empty else "❌ not found in XBRL"
+    debug["Total Equity"]   = _dbg_series(te,  "Total Equity")  if not te.empty  else "❌ not found in XBRL"
+    debug["Dividends Paid"] = _dbg_series(div, "Dividends Paid") if not div.empty else "❌ not found (company may not pay dividends)"
+    debug["price_s years"]  = f"index dtype={price_s.index.dtype} | {price_s.index.tolist()[:5]}..."
 
     new: dict[str, pd.Series] = {}
 
