@@ -226,20 +226,108 @@ METRIC_TAGS: dict[str, list[str]] = {
         "PaymentsOfDividendsCommonStock",
         "PaymentsOfDividends",
     ],
+    # ── Extended Income Statement (core financial ontology) ────────────────────
+    "COGS": [
+        "CostOfRevenue",
+        "CostOfGoodsAndServicesSold",
+        "CostOfGoodsSold",
+        "CostOfServices",
+        "CostOfGoodsAndServiceExcludingDepreciationDepletionAndAmortization",
+    ],
+    "SG&A": [
+        "SellingGeneralAndAdministrativeExpense",
+        "GeneralAndAdministrativeExpense",
+        "SellingAndMarketingExpense",
+    ],
+    "R&D": [
+        "ResearchAndDevelopmentExpense",
+        "ResearchAndDevelopmentExpenseExcludingAcquiredInProcessCost",
+    ],
+    "Interest Expense": [
+        "InterestExpense",
+        "InterestAndDebtExpense",
+        "InterestExpenseDebt",
+        "InterestExpenseRelatedParty",
+    ],
+    "Income Tax": [
+        "IncomeTaxExpenseBenefit",
+        "CurrentIncomeTaxExpenseBenefit",
+        "DeferredIncomeTaxExpenseBenefit",
+    ],
+    # ── Extended Balance Sheet ──────────────────────────────────────────────────
+    "Retained Earnings": [
+        "RetainedEarningsAccumulatedDeficit",
+        "RetainedEarningsUnappropriated",
+    ],
+    "Accounts Payable": [
+        "AccountsPayableCurrent",
+        "AccountsPayableTradeCurrent",
+        "AccountsPayableCurrentAndNoncurrent",
+    ],
+    # ── Extended Cash Flow ─────────────────────────────────────────────────────
+    "Investing CF": [
+        "NetCashProvidedByUsedInInvestingActivities",
+        "NetCashProvidedByUsedInInvestingActivitiesContinuingOperations",
+    ],
+    "Financing CF": [
+        "NetCashProvidedByUsedInFinancingActivities",
+        "NetCashProvidedByUsedInFinancingActivitiesContinuingOperations",
+    ],
+    "Acquisitions": [
+        "PaymentsToAcquireBusinessesNetOfCashAcquired",
+        "PaymentsToAcquireBusinessesGross",
+        "PaymentsToAcquireBusinessesAndInterestInAffiliates",
+    ],
+    "Debt Issued": [
+        "ProceedsFromIssuanceOfLongTermDebt",
+        "ProceedsFromIssuanceOfDebt",
+        "ProceedsFromDebtNetOfIssuanceCosts",
+        "ProceedsFromBorrowings",
+    ],
+    "Debt Repaid": [
+        "RepaymentsOfLongTermDebt",
+        "RepaymentsOfDebt",
+        "RepaymentsOfLongTermDebtAndCapitalSecurities",
+    ],
+    "Change in Cash": [
+        "CashAndCashEquivalentsPeriodIncreaseDecrease",
+        "CashCashEquivalentsPeriodIncreaseDecreaseExcludingExchangeRateEffect",
+        "NetCashProvidedByUsedInContinuingOperations",
+    ],
 }
 
-INCOME_METRICS   = ["Revenue", "Gross Profit", "Operating Income", "Net Income",
-                     "EPS Diluted", "EPS Basic", "Diluted Shares"]
-BALANCE_METRICS  = ["Total Assets", "Cash", "Accounts Receivable", "Inventory",
-                     "Current Assets", "PP&E Net", "Goodwill", "Intangibles",
-                     "Total Liabilities", "Current Liabilities", "Long Term Debt", "Total Equity"]
-CASHFLOW_METRICS = ["Operating Cash Flow", "CapEx", "D&A", "Share Repurchases", "Dividends Paid"]
-DERIVED_METRICS  = ["Gross Margin", "Operating Margin", "Net Margin",
-                     "Revenue Growth", "Net Income Growth",
-                     "FCF", "FCF Margin", "ROA", "ROE",
-                     "Net Debt", "Debt/Equity", "Debt/Assets",
-                     # Price-based (populated when yfinance data is available)
-                     "Market Cap", "P/E Ratio", "Price/Book", "Dividend Yield"]
+INCOME_METRICS   = [
+    "Revenue", "COGS", "Gross Profit",
+    "SG&A", "R&D",
+    "Operating Income",
+    "Interest Expense", "Income Tax",
+    "Net Income",
+    "EPS Diluted", "EPS Basic", "Diluted Shares",
+]
+BALANCE_METRICS  = [
+    "Total Assets", "Current Assets", "Cash",
+    "Accounts Receivable", "Inventory",
+    "PP&E Net", "Goodwill", "Intangibles",
+    "Total Liabilities", "Current Liabilities",
+    "Long Term Debt", "Accounts Payable",
+    "Total Equity", "Retained Earnings",
+]
+CASHFLOW_METRICS = [
+    "Operating Cash Flow", "Investing CF", "Financing CF",
+    "CapEx", "Acquisitions",
+    "D&A", "Share Repurchases", "Dividends Paid",
+    "Debt Issued", "Debt Repaid",
+    "Change in Cash",
+]
+DERIVED_METRICS  = [
+    "Gross Margin", "Operating Margin", "Net Margin",
+    "EBITDA", "EBITDA Margin",
+    "Revenue Growth", "Net Income Growth",
+    "FCF", "FCF Margin", "ROA", "ROE",
+    "Net Debt", "Debt/Equity", "Debt/Assets",
+    # Price-based (populated when yfinance data is available)
+    "Market Cap", "P/E Ratio", "Price/Book", "Dividend Yield",
+]
 ALL_STD_METRICS  = INCOME_METRICS + BALANCE_METRICS + CASHFLOW_METRICS + DERIVED_METRICS
 
 # Display metadata: fmt codes = usd_b | usd_share | shares_b | pct | pct_signed | ratio
@@ -266,13 +354,31 @@ METRIC_DISPLAY: dict[str, dict] = {
     "Long Term Debt":      {"fmt": "usd_b"},
     "Total Equity":        {"fmt": "usd_b",    "key": True},
     "Operating Cash Flow": {"fmt": "usd_b",    "key": True},
+    "Investing CF":        {"fmt": "usd_b"},
+    "Financing CF":        {"fmt": "usd_b"},
     "CapEx":               {"fmt": "usd_b",    "negate": True},
+    "Acquisitions":        {"fmt": "usd_b",    "negate": True},
     "D&A":                 {"fmt": "usd_b"},
     "Share Repurchases":   {"fmt": "usd_b",    "negate": True},
     "Dividends Paid":      {"fmt": "usd_b"},
+    "Debt Issued":         {"fmt": "usd_b"},
+    "Debt Repaid":         {"fmt": "usd_b",    "negate": True},
+    "Change in Cash":      {"fmt": "usd_b"},
+    # Extended Income Statement
+    "COGS":                {"fmt": "usd_b"},
+    "SG&A":                {"fmt": "usd_b"},
+    "R&D":                 {"fmt": "usd_b"},
+    "Interest Expense":    {"fmt": "usd_b"},
+    "Income Tax":          {"fmt": "usd_b"},
+    # Extended Balance Sheet
+    "Retained Earnings":   {"fmt": "usd_b"},
+    "Accounts Payable":    {"fmt": "usd_b"},
+    # Derived metrics
     "Gross Margin":        {"fmt": "pct"},
     "Operating Margin":    {"fmt": "pct"},
     "Net Margin":          {"fmt": "pct"},
+    "EBITDA":              {"fmt": "usd_b",    "key": True},
+    "EBITDA Margin":       {"fmt": "pct"},
     "Revenue Growth":      {"fmt": "pct_signed"},
     "Net Income Growth":   {"fmt": "pct_signed"},
     "FCF":                 {"fmt": "usd_b",    "key": True},
@@ -288,6 +394,109 @@ METRIC_DISPLAY: dict[str, dict] = {
     "Price/Book":          {"fmt": "ratio"},
     "Dividend Yield":      {"fmt": "pct"},
 }
+
+# ── Methodology documentation (shown in the 📖 Methodology tab) ───────────────
+METHODOLOGY_MD = """
+## 📖 Financial Metrics — Methodology Reference
+
+This reference explains every metric shown in **Standardized Financials**, including
+the formula used and the primary SEC EDGAR XBRL tags queried.
+
+> **Tag resolution**: For each metric, XBRL tags are tried **in priority order**.
+> The first tag that yields valid annual data wins.
+> All financial data comes from the SEC EDGAR `companyfacts` API.
+> Stock prices are fetched via **yfinance** (last monthly close per calendar year).
+> All dollar figures are shown in USD Billions (B) unless noted.
+
+---
+
+### 📈 Income Statement
+
+| Metric | Formula / Source | Primary XBRL Tags | Notes |
+|:-------|:----------------|:------------------|:------|
+| **Revenue** | Direct from XBRL | `Revenues` · `RevenueFromContractWithCustomerExcludingAssessedTax` · `SalesRevenueNet` · `RevenuesNetOfInterestExpense` | Net revenues / net sales. 8 tags tried. |
+| **COGS** | Direct from XBRL | `CostOfRevenue` · `CostOfGoodsAndServicesSold` · `CostOfGoodsSold` | Cost of goods/services. Revenue − COGS = Gross Profit. |
+| **Gross Profit** | Direct from XBRL *(≈ Revenue − COGS)* | `GrossProfit` | Sourced directly from XBRL when available. |
+| **SG&A** | Direct from XBRL | `SellingGeneralAndAdministrativeExpense` · `GeneralAndAdministrativeExpense` | Selling, general & administrative overhead. |
+| **R&D** | Direct from XBRL | `ResearchAndDevelopmentExpense` | Research & development investment. |
+| **Operating Income** | Direct from XBRL *(≈ Gross Profit − SG&A − R&D − D&A)* | `OperatingIncomeLoss` | Also known as **EBIT** (Earnings Before Interest & Taxes). |
+| **Interest Expense** | Direct from XBRL | `InterestExpense` · `InterestAndDebtExpense` | Cost of debt financing. Used in EBITDA fallback. |
+| **Income Tax** | Direct from XBRL | `IncomeTaxExpenseBenefit` | Tax provision (positive = expense). Used in EBITDA fallback. |
+| **Net Income** | Direct from XBRL | `NetIncomeLoss` · `NetIncomeLossAvailableToCommonStockholdersBasic` · `ProfitLoss` | After-tax bottom-line profit. |
+| **EPS Diluted** | Direct *(or Net Income ÷ Diluted Shares)* | `EarningsPerShareDiluted` · `EarningsPerShareBasic` | Computed ratio if direct tag is absent. |
+| **EPS Basic** | Direct from XBRL | `EarningsPerShareBasic` | Undiluted earnings per share. |
+| **Diluted Shares** | Direct from XBRL | `WeightedAverageNumberOfDilutedSharesOutstanding` · `WeightedAverageNumberOfSharesOutstandingBasic` · `CommonStockSharesOutstanding` · `EntityCommonStockSharesOutstanding` | Weighted-average diluted share count; EPS denominator. |
+
+---
+
+### 🏦 Balance Sheet
+
+| Metric | Formula / Source | Primary XBRL Tags | Notes |
+|:-------|:----------------|:------------------|:------|
+| **Total Assets** | Direct from XBRL | `Assets` | All assets at period end. |
+| **Current Assets** | Direct from XBRL | `AssetsCurrent` | Convertible to cash within 12 months. |
+| **Cash** | Direct from XBRL | `CashAndCashEquivalentsAtCarryingValue` · `CashCashEquivalentsAndShortTermInvestments` | Unrestricted cash & equivalents. |
+| **Accounts Receivable** | Direct from XBRL | `AccountsReceivableNetCurrent` · `ReceivablesNetCurrent` | Customer receivables, net of allowances. |
+| **Inventory** | Direct from XBRL | `InventoryNet` · `InventoryGross` | Goods held for sale. |
+| **PP&E Net** | Direct from XBRL | `PropertyPlantAndEquipmentNet` | Fixed assets net of accumulated depreciation. |
+| **Goodwill** | Direct from XBRL | `Goodwill` | Premium paid over fair value in acquisitions. |
+| **Intangibles** | Direct from XBRL | `IntangibleAssetsNetExcludingGoodwill` · `FiniteLivedIntangibleAssetsNet` | Patents, trademarks, customer lists, etc. |
+| **Total Liabilities** | Direct from XBRL | `Liabilities` | All obligations at period end. |
+| **Current Liabilities** | Direct from XBRL | `LiabilitiesCurrent` | Due within 12 months. |
+| **Long Term Debt** | Direct from XBRL | `LongTermDebt` · `LongTermDebtNoncurrent` · `LongTermNotesPayable` | Debt maturing beyond 12 months. |
+| **Accounts Payable** | Direct from XBRL | `AccountsPayableCurrent` · `AccountsPayableTradeCurrent` | Amounts owed to suppliers. |
+| **Total Equity** | Direct from XBRL | `StockholdersEquity` · `StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest` | Shareholders' book value. |
+| **Retained Earnings** | Direct from XBRL | `RetainedEarningsAccumulatedDeficit` | Cumulative profits retained *(negative = accumulated deficit)*. |
+
+---
+
+### 💵 Cash Flow Statement
+
+| Metric | Formula / Source | Primary XBRL Tags | Notes |
+|:-------|:----------------|:------------------|:------|
+| **Operating Cash Flow** | Direct from XBRL | `NetCashProvidedByUsedInOperatingActivities` | Cash from core operations (indirect method). |
+| **Investing CF** | Direct from XBRL | `NetCashProvidedByUsedInInvestingActivities` | Net cash used in investing (usually negative). |
+| **Financing CF** | Direct from XBRL | `NetCashProvidedByUsedInFinancingActivities` | Net cash from debt/equity activity. |
+| **CapEx** | Direct *(displayed as outflow)* | `PaymentsToAcquirePropertyPlantAndEquipment` | Capital expenditures. XBRL positive → shown negative. |
+| **Acquisitions** | Direct *(displayed as outflow)* | `PaymentsToAcquireBusinessesNetOfCashAcquired` | M&A cash payments, net of acquired cash. |
+| **D&A** | Direct from XBRL | `DepreciationDepletionAndAmortization` · `DepreciationAndAmortization` · `Depreciation` | Non-cash add-back. Also the D&A component of EBITDA. |
+| **Share Repurchases** | Direct *(displayed as outflow)* | `PaymentsForRepurchaseOfCommonStock` | Stock buybacks. XBRL positive → shown negative. |
+| **Dividends Paid** | Direct from XBRL | `PaymentsOfDividendsCommonStock` · `PaymentsOfDividends` | Cash dividends *(positive = income to investor)*. |
+| **Debt Issued** | Direct from XBRL | `ProceedsFromIssuanceOfLongTermDebt` · `ProceedsFromIssuanceOfDebt` | New debt proceeds (inflow). |
+| **Debt Repaid** | Direct *(displayed as outflow)* | `RepaymentsOfLongTermDebt` · `RepaymentsOfDebt` | Principal repayments. XBRL positive → shown negative. |
+| **Change in Cash** | Direct from XBRL | `CashAndCashEquivalentsPeriodIncreaseDecrease` | Net: Operating CF + Investing CF + Financing CF. |
+
+---
+
+### 📐 Derived Metrics
+
+| Metric | Formula | Inputs | Notes |
+|:-------|:--------|:-------|:------|
+| **Gross Margin** | Gross Profit ÷ Revenue | Income | Raw product/service profitability. |
+| **Operating Margin** | Operating Income ÷ Revenue | Income | Efficiency after all operating costs *(EBIT Margin)*. |
+| **Net Margin** | Net Income ÷ Revenue | Income | After-tax bottom-line profitability. |
+| **EBITDA** | *Method 1:* Operating Income + D&A | Income + CF | Non-GAAP proxy for cash earnings. Method 1 preferred. |
+|  | *Fallback:* Net Income + Interest + Tax + D&A | Income + CF | Used when Operating Income unavailable. |
+| **EBITDA Margin** | EBITDA ÷ Revenue | Derived | Sector-neutral profitability benchmark. |
+| **Revenue Growth** | Revenue_t ÷ Revenue_{t−1} − 1 | Income | Year-over-year top-line growth rate. |
+| **Net Income Growth** | Net Income_t ÷ Net Income_{t−1} − 1 | Income | Year-over-year bottom-line growth. |
+| **FCF** | Operating Cash Flow − CapEx | Cash Flow | Cash left after maintaining the asset base. |
+| **FCF Margin** | FCF ÷ Revenue | Derived | Cash conversion efficiency. |
+| **ROA** | Net Income ÷ Total Assets | Income + Balance | Profit generated per dollar of assets. |
+| **ROE** | Net Income ÷ Total Equity | Income + Balance | Return on shareholders' book equity. |
+| **Net Debt** | Long-Term Debt − Cash | Balance | Leverage net of liquidity *(negative = net cash)*. |
+| **Debt/Equity** | Long-Term Debt ÷ Total Equity | Balance | Financial leverage ratio. |
+| **Debt/Assets** | Long-Term Debt ÷ Total Assets | Balance | Balance-sheet leverage as share of assets. |
+| **Market Cap** | Stock Price × Diluted Shares | yfinance + XBRL | Last calendar-year close price from yfinance. |
+| **P/E Ratio** | Stock Price ÷ EPS Diluted | yfinance + XBRL | Price-to-earnings multiple *(positive values only)*. |
+| **Price/Book** | Market Cap ÷ Total Equity | yfinance + XBRL | Market vs. book value *(positive values only)*. |
+| **Dividend Yield** | (Dividends Paid ÷ Diluted Shares) ÷ Stock Price | yfinance + XBRL | Annual dividend as % of stock price. |
+
+---
+> **FY alignment**: Fiscal year data is mapped by the calendar year of the period-end date.
+> For September fiscal years (e.g., Visa), FY2024 ends Sep 30, 2024 → mapped to year **2024**.
+> The stock price for year 2024 = the last monthly close within calendar year 2024 (December 2024).
+"""
 
 # ── SEC EDGAR API (all cached) ─────────────────────────────────────────────────
 @st.cache_data(ttl=3_600, show_spinner=False)
@@ -659,6 +868,7 @@ def build_financial_statements(facts: dict) -> dict[str, pd.DataFrame]:
     ni  = g("Net Income"); ocf = g("Operating Cash Flow"); cx = g("CapEx")
     ta  = g("Total Assets"); te = g("Total Equity")
     ltd = g("Long Term Debt"); cas = g("Cash")
+    da  = g("D&A"); iex = g("Interest Expense"); itx = g("Income Tax")
 
     def safe_div(a: pd.Series, b: pd.Series) -> pd.Series:
         return a.div(b.replace(0, float("nan")))
@@ -667,6 +877,22 @@ def build_financial_statements(facts: dict) -> dict[str, pd.DataFrame]:
     if not rev.empty and not gp.empty:       drv["Gross Margin"]      = safe_div(gp, rev)
     if not rev.empty and not oi.empty:       drv["Operating Margin"]  = safe_div(oi, rev)
     if not rev.empty and not ni.empty:       drv["Net Margin"]        = safe_div(ni, rev)
+
+    # ── EBITDA ──────────────────────────────────────────────────────────────────
+    # Method 1 (preferred): Operating Income + D&A  (EBIT + D&A)
+    # Method 2 (fallback):  Net Income + Interest + Tax + D&A
+    _ebitda: pd.Series | None = None
+    if not oi.empty and not da.empty:
+        _ebitda = oi.add(da.abs(), fill_value=0)
+        drv["EBITDA"] = _ebitda
+    elif not ni.empty and not da.empty:
+        _ebitda = ni.add(da.abs(), fill_value=0)
+        if not iex.empty: _ebitda = _ebitda.add(iex.abs(), fill_value=0)
+        if not itx.empty: _ebitda = _ebitda.add(itx.abs(), fill_value=0)
+        drv["EBITDA"] = _ebitda
+    if _ebitda is not None and not rev.empty:
+        drv["EBITDA Margin"] = safe_div(_ebitda, rev)
+
     if len(rev) > 1:                         drv["Revenue Growth"]    = rev.sort_index().pct_change()
     if len(ni) > 1:                          drv["Net Income Growth"] = ni.sort_index().pct_change()
 
@@ -845,6 +1071,11 @@ def compute_price_metrics(stmts: dict, prices: dict) -> None:
     debug["EPS Diluted"]    = _yr(eps, " [computed]" if computed_eps else "")
     debug["Total Equity"]   = _yr(te)
     debug["Dividends Paid"] = _yr(div)
+    # Explicit year lists — helps diagnose fiscal-year mapping mismatches
+    debug["→ px years"]     = ", ".join(str(y) for y in sorted(px.index)) if not px.empty else "—"
+    debug["→ sh years"]     = ", ".join(str(y) for y in sorted(sh.index)) if not sh.empty else "—"
+    _overlap = sorted(set(px.index) & set(sh.index))
+    debug["→ overlap yrs"]  = f"{len(_overlap)} yrs: " + (", ".join(str(y) for y in _overlap) if _overlap else "none")
 
     new: dict[str, pd.Series] = {}
 
@@ -853,8 +1084,10 @@ def compute_price_metrics(stmts: dict, prices: dict) -> None:
     if not mc.empty:
         new["Market Cap"] = mc
         debug["Market Cap"] = f"✅ {len(mc)} yrs ({int(mc.index.min())}–{int(mc.index.max())})"
+        debug["→ mc years"] = ", ".join(str(y) for y in sorted(mc.index))
     else:
         debug["Market Cap"] = "❌ needs Diluted Shares"
+        debug["→ mc years"] = "empty — px × sh produced no overlap"
 
     # P/E Ratio = Price / EPS  (keep only positive, sensible values)
     if not eps.empty:
@@ -1571,12 +1804,13 @@ else:
             st.stop()
 
         # ── Statement tabs ────────────────────────────────────────────────────
-        tab_is, tab_bs, tab_cf, tab_drv, tab_cmp = st.tabs([
+        tab_is, tab_bs, tab_cf, tab_drv, tab_cmp, tab_meth = st.tabs([
             "📈 Income Statement",
             "🏦 Balance Sheet",
             "💵 Cash Flow",
             "📐 Derived Metrics",
             "🔀 Compare Companies",
+            "📖 Methodology",
         ])
 
         def _stmt_tab(tab, df: pd.DataFrame, metric_list: list[str],
@@ -1747,6 +1981,10 @@ else:
                         mime="text/csv",
                         key="dl_cmp",
                     )
+
+        # ── Methodology tab ───────────────────────────────────────────────────
+        with tab_meth:
+            st.markdown(METHODOLOGY_MD)
 
     # ══════════════════════════════════════════════════════════════════════════
     #  MODE B — RAW KPI EXPLORER
