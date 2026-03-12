@@ -2528,6 +2528,28 @@ elif page == "💰  Model DCF":
             if d0 is not None and s0 is not None and s0 != 0:
                 latest_dps = abs(float(d0)) / abs(float(s0))
 
+    # ── Net Debt & Enterprise Value ───────────────────────────────────────────
+    # Net Debt = Long Term Debt − Cash  (negative ⟹ net cash position)
+    # Enterprise Value (EV) = Market Cap (equity) + Net Debt
+    # EV is the correct denominator for FCFF-based models discounted at WACC.
+    nd_series  = _dcf_series(stmts_d, "Net Debt")
+    ltd_series = _dcf_series(stmts_d, "Long Term Debt")
+    csh_series = _dcf_series(stmts_d, "Cash")
+
+    latest_net_debt: float | None = None
+    if not nd_series.empty:
+        latest_net_debt = float(nd_series.sort_index(ascending=False).iloc[0])
+    elif not ltd_series.empty:
+        ltd0 = float(ltd_series.sort_index(ascending=False).iloc[0])
+        csh0 = float(csh_series.sort_index(ascending=False).iloc[0]) if not csh_series.empty else 0.0
+        latest_net_debt = ltd0 - csh0
+
+    # EV = Market Cap + Net Debt  (if net cash, net_debt < 0, so EV < MC)
+    latest_ev: float | None = None
+    if latest_mc is not None:
+        nd_adj = latest_net_debt if latest_net_debt is not None else 0.0
+        latest_ev = latest_mc + nd_adj
+
     # ── Auto-compute WACC defaults ─────────────────────────────────────────────
     beta_auto = load_beta(dcf_tk)
     rf_def    = 4.5   # %
@@ -2626,23 +2648,21 @@ elif page == "💰  Model DCF":
         st.markdown("---")
         st.markdown("#### Key Inputs")
 
-        km1, km2, km3, km4 = st.columns(4)
-        km1.metric(
-            "Stock Price (latest)",
-            f"${latest_price:,.2f}" if latest_price else "—",
-        )
-        km2.metric(
-            "Market Cap",
-            f"${latest_mc/1e9:.1f}B" if latest_mc else "—",
-        )
-        km3.metric(
-            "Latest FCF",
-            f"${latest_fcf/1e9:.1f}B" if latest_fcf is not None else "—",
-        )
-        km4.metric(
-            "DPS (latest)",
-            f"${latest_dps:.2f}" if latest_dps else "—",
-        )
+        km1, km2, km3, km4, km5, km6 = st.columns(6)
+        km1.metric("Stock Price (latest)",
+                   f"${latest_price:,.2f}" if latest_price else "—")
+        km2.metric("Market Cap (Equity)",
+                   f"${latest_mc/1e9:.1f}B" if latest_mc else "—")
+        km3.metric("Net Debt",
+                   (f"${latest_net_debt/1e9:.1f}B" if latest_net_debt is not None else "—"),
+                   delta="Net Cash" if (latest_net_debt is not None and latest_net_debt < 0) else None)
+        km4.metric("Enterprise Value",
+                   f"${latest_ev/1e9:.1f}B" if latest_ev else "—",
+                   help="EV = Market Cap + Net Debt. Used as denominator in FCF/WACC reverse DCF.")
+        km5.metric("Latest FCF",
+                   f"${latest_fcf/1e9:.1f}B" if latest_fcf is not None else "—")
+        km6.metric("DPS (latest)",
+                   f"${latest_dps:.2f}" if latest_dps else "—")
 
         # ── Reverse DCF Results ───────────────────────────────────────────────
         st.markdown("---")
@@ -2650,15 +2670,16 @@ elif page == "💰  Model DCF":
 
         rcol1, rcol2 = st.columns(2)
 
-        # Model A — FCF (discounted at WACC)
+        # Model A — FCF (discounted at WACC)  →  solves for EV-implied growth
         with rcol1:
             st.markdown("##### Model A — FCF / WACC")
             st.info(
-                "Market Cap = FCF × (1+g) / (WACC − g)\n\n"
-                "Solving: **g = (MC × WACC − FCF) / (MC + FCF)**"
+                "**EV** = FCF × (1+g) / (WACC − g)\n\n"
+                "Solving: **g = (EV × WACC − FCF) / (EV + FCF)**\n\n"
+                "where EV = Market Cap + Net Debt"
             )
-            if latest_mc and latest_fcf is not None and wacc_user > 0:
-                g_fcf = reverse_dcf_fcf(latest_mc, latest_fcf, wacc_user)
+            if latest_ev and latest_fcf is not None and wacc_user > 0:
+                g_fcf = reverse_dcf_fcf(latest_ev, latest_fcf, wacc_user)
                 if g_fcf is not None:
                     color = "#10b981" if g_fcf >= 0 else "#ef4444"
                     st.markdown(
@@ -2666,17 +2687,20 @@ elif page == "💰  Model DCF":
                         f'background:#f0f9ff;border-radius:10px;'
                         f'border:2px solid #3b82f6">'
                         f'<p style="margin:0;color:#64748b;font-size:13px">'
-                        f'Implied FCF Growth Rate</p>'
+                        f'Implied FCF Growth Rate (EV-based)</p>'
                         f'<p style="margin:4px 0 0;font-size:2.2em;'
                         f'font-weight:800;color:{color}">'
                         f'{g_fcf*100:+.1f}%</p>'
+                        f'<p style="margin:4px 0 0;font-size:11px;color:#94a3b8">'
+                        f'EV ${latest_ev/1e9:.1f}B = MC ${latest_mc/1e9:.1f}B'
+                        f' + Net Debt ${(latest_net_debt or 0)/1e9:.1f}B</p>'
                         f'</div>',
                         unsafe_allow_html=True,
                     )
                 else:
                     st.warning("Cannot compute — check inputs (WACC > g required)")
             else:
-                st.caption("Requires Market Cap, FCF, and WACC > 0")
+                st.caption("Requires Enterprise Value, FCF, and WACC > 0")
 
         # Model B — DDM (discounted at Cost of Equity)
         with rcol2:
@@ -2713,25 +2737,25 @@ elif page == "💰  Model DCF":
                 )
 
         # ── FCF Model Sensitivity Table ───────────────────────────────────────
-        if latest_mc and latest_fcf is not None and wacc_user > 0:
+        if latest_ev and latest_fcf is not None and wacc_user > 0:
             st.markdown("---")
             st.markdown("#### 🔢 Sensitivity — Implied FCF Growth Rate")
             st.caption(
                 "Rows = WACC ± 1pp / ±0.5pp | "
-                "Columns = Market Cap ± 10% / ±5%"
+                "Columns = Enterprise Value ± 10% / ±5%"
             )
 
             wacc_offsets  = [-0.010, -0.005, 0.000, +0.005, +0.010]
-            mc_multipliers = [0.90, 0.95, 1.00, 1.05, 1.10]
+            ev_multipliers = [0.90, 0.95, 1.00, 1.05, 1.10]
 
             sens_rows = []
             for w_off in wacc_offsets:
                 w_val = wacc_user + w_off
                 row_data = {"WACC": f"{w_val*100:.2f}%"}
-                for mc_mult in mc_multipliers:
-                    mc_var = latest_mc * mc_mult
-                    g_var  = reverse_dcf_fcf(mc_var, latest_fcf, w_val)
-                    row_data[f"MC ×{mc_mult:.2f}"] = (
+                for ev_mult in ev_multipliers:
+                    ev_var = latest_ev * ev_mult
+                    g_var  = reverse_dcf_fcf(ev_var, latest_fcf, w_val)
+                    row_data[f"EV ×{ev_mult:.2f}"] = (
                         f"{g_var*100:+.1f}%" if g_var is not None else "—"
                     )
                 sens_rows.append(row_data)
@@ -2990,7 +3014,12 @@ elif page == "💰  Model DCF":
             st.markdown("#### 💡 Intrinsic Value Summary")
 
             sum_pv_fcf = sum(pv_fcfs)
-            total_iv   = sum_pv_fcf + (pv_tv if pv_tv is not None else 0.0)
+            # PV of FCFF discounted at WACC = Enterprise Value (EV)
+            implied_ev = sum_pv_fcf + (pv_tv if pv_tv is not None else 0.0)
+
+            # Bridge: Equity Value = EV − Net Debt
+            nd_fwd = latest_net_debt if latest_net_debt is not None else 0.0
+            equity_iv = implied_ev - nd_fwd
 
             # Per-share value
             sh_latest = None
@@ -2998,24 +3027,51 @@ elif page == "💰  Model DCF":
             if not sh_s2.empty:
                 sh_latest = float(sh_s2.sort_index(ascending=False).iloc[0])
 
-            iv_per_share = total_iv / sh_latest if sh_latest and sh_latest > 0 else None
+            iv_per_share = equity_iv / sh_latest if sh_latest and sh_latest > 0 else None
 
-            sv1, sv2, sv3, sv4 = st.columns(4)
-            sv1.metric(
-                "Sum of PV (FCFs)",
-                f"${sum_pv_fcf/1e9:.1f}B",
-            )
-            sv2.metric(
-                "PV of Terminal Value",
-                f"${pv_tv/1e9:.1f}B" if pv_tv is not None else "—",
-            )
-            sv3.metric(
-                "Total Intrinsic Value",
-                f"${total_iv/1e9:.1f}B",
-            )
-            sv4.metric(
-                "Intrinsic Value / Share",
-                f"${iv_per_share:.2f}" if iv_per_share else "—",
+            # Row 1: DCF components (EV build-up)
+            sv1, sv2, sv3 = st.columns(3)
+            sv1.metric("Sum of PV (FCFs)",
+                       f"${sum_pv_fcf/1e9:.1f}B")
+            sv2.metric("PV of Terminal Value",
+                       f"${pv_tv/1e9:.1f}B" if pv_tv is not None else "—")
+            sv3.metric("Implied EV  (= PV of FCFF @ WACC)",
+                       f"${implied_ev/1e9:.1f}B")
+
+            # Row 2: EV → Equity bridge
+            st.markdown(
+                '<div style="background:#f8fafc;border:1px solid #e2e8f0;'
+                'border-radius:10px;padding:14px 20px;margin:10px 0 4px">'
+                '<p style="margin:0 0 8px;font-weight:700;color:#0f172a;font-size:13px">'
+                '🔗 EV → Equity Bridge</p>'
+                '<table style="width:100%;border-collapse:collapse;font-size:13px">'
+                '<tr>'
+                f'<td style="padding:4px 8px;color:#475569">Implied Enterprise Value (EV)</td>'
+                f'<td style="padding:4px 8px;text-align:right;font-weight:600">'
+                f'${implied_ev/1e9:.1f}B</td></tr>'
+                f'<tr><td style="padding:4px 8px;color:#475569">'
+                f'Less: Net Debt (Debt − Cash)</td>'
+                f'<td style="padding:4px 8px;text-align:right;font-weight:600;color:#ef4444">'
+                f'(${nd_fwd/1e9:.1f}B)</td></tr>'
+                f'<tr style="border-top:2px solid #cbd5e1">'
+                f'<td style="padding:6px 8px;font-weight:700;color:#0f172a">'
+                f'= Intrinsic Equity Value</td>'
+                f'<td style="padding:6px 8px;text-align:right;font-weight:700;color:#0f172a">'
+                f'${equity_iv/1e9:.1f}B</td></tr>'
+                f'<tr><td style="padding:4px 8px;color:#475569">'
+                f'÷ Diluted Shares Outstanding</td>'
+                f'<td style="padding:4px 8px;text-align:right;font-weight:600">'
+                f'{sh_latest/1e6:.0f}M shares</td></tr>'
+                f'<tr style="border-top:2px solid #3b82f6">'
+                f'<td style="padding:6px 8px;font-weight:800;color:#1d4ed8;font-size:14px">'
+                f'= Intrinsic Value / Share</td>'
+                f'<td style="padding:6px 8px;text-align:right;font-weight:800;'
+                f'color:#1d4ed8;font-size:14px">'
+                f'${iv_per_share:.2f}</td></tr>'
+                f'</table></div>'
+                if (sh_latest and iv_per_share) else
+                '<p style="color:#94a3b8">Cannot compute per-share value — missing share count.</p>',
+                unsafe_allow_html=True,
             )
 
             # Upside / downside vs current price
@@ -3029,7 +3085,7 @@ elif page == "💰  Model DCF":
                     f'border:2px solid {color_up}">'
                     f'<p style="margin:0;color:#64748b;font-size:13px">'
                     f'Current Price: <strong>${latest_price:,.2f}</strong> | '
-                    f'Intrinsic Value: <strong>${iv_per_share:.2f}</strong></p>'
+                    f'Intrinsic Value / Share: <strong>${iv_per_share:.2f}</strong></p>'
                     f'<p style="margin:6px 0 0;font-size:1.8em;'
                     f'font-weight:800;color:{color_up}">'
                     f'{label_up}: {upside:+.1f}%</p>'
