@@ -1220,11 +1220,15 @@ def reverse_dcf_ddm(price: float, dps: float, r_e: float) -> float | None:
     return g if (-0.30 < g < r_e) else None
 
 
-def build_fcf_bridge(stmts: dict, n: int = 7) -> pd.DataFrame:
+def build_fcf_bridge(stmts: dict, n: int = 7, tax_rate: float = 0.21) -> pd.DataFrame:
     """
-    Build simplified FCF bridge:
-      Revenue − COGS − SG&A = EBITDA(simplified)
-                             − CapEx_abs − ΔNWC = FCF(bridge)
+    Build FCFF bridge with full tax step:
+      Revenue − COGS − SG&A  = EBITDA (simplified)
+      EBITDA  − D&A           = EBIT
+      EBIT    × tax_rate      = Taxes
+      EBIT    × (1−tax_rate)  = NOPAT
+      NOPAT   + D&A − CapEx − ΔNWC = FCFF
+
     Year selection anchors on the series with the most-recent data among
     Revenue, FCF (derived), CapEx — handles financial-sector companies
     (e.g. AXP) whose Revenue XBRL tags only appear in older filings.
@@ -1233,6 +1237,7 @@ def build_fcf_bridge(stmts: dict, n: int = 7) -> pd.DataFrame:
     rev        = _dcf_series(stmts, "Revenue")
     cogs       = _dcf_series(stmts, "COGS")
     sga        = _dcf_series(stmts, "SG&A")
+    da_s       = _dcf_series(stmts, "D&A")
     capex      = _dcf_series(stmts, "CapEx")
     ca         = _dcf_series(stmts, "Current Assets")
     cash       = _dcf_series(stmts, "Cash")
@@ -1250,12 +1255,29 @@ def build_fcf_bridge(stmts: dict, n: int = 7) -> pd.DataFrame:
 
     for yr in sorted(all_years):        # ascending to compute delta
         r  = rev.get(yr);   c = cogs.get(yr);  s = sga.get(yr)
-        cx = capex.get(yr)
+        cx = capex.get(yr);  da_raw = da_s.get(yr)
 
+        # ── EBITDA (simplified) ────────────────────────────────────────────────
         ebitda_s = r
         if c is not None: ebitda_s = ebitda_s - c if ebitda_s is not None else None
         if s is not None: ebitda_s = ebitda_s - s if ebitda_s is not None else None
 
+        # ── D&A (always positive — add back later) ────────────────────────────
+        da_abs = abs(da_raw) if da_raw is not None else None
+
+        # ── EBIT = EBITDA − D&A ───────────────────────────────────────────────
+        if ebitda_s is not None and da_abs is not None:
+            ebit = ebitda_s - da_abs
+        else:
+            ebit = ebitda_s   # fallback when D&A unavailable
+
+        # ── Taxes = max(EBIT, 0) × tax_rate  (no tax benefit on losses) ───────
+        taxes = max(float(ebit), 0.0) * tax_rate if ebit is not None else None
+
+        # ── NOPAT = EBIT × (1 − tax_rate) ────────────────────────────────────
+        nopat = ebit * (1.0 - tax_rate) if ebit is not None else None
+
+        # ── NWC & delta ───────────────────────────────────────────────────────
         _ca = ca.get(yr); _cas = cash.get(yr); _cl = cl.get(yr)
         nwc = (_ca - (_cas or 0)) - _cl if (_ca is not None and _cl is not None) else None
         d_nwc = (nwc - nwc_prev) if (nwc is not None and nwc_prev is not None) else None
@@ -1263,15 +1285,19 @@ def build_fcf_bridge(stmts: dict, n: int = 7) -> pd.DataFrame:
 
         cx_abs = abs(cx) if cx is not None else None
 
-        # Try bridge FCF first; fall back to derived FCF for this year
-        fcf_b = ebitda_s
-        if fcf_b is not None and cx_abs is not None: fcf_b -= cx_abs
-        if fcf_b is not None and d_nwc  is not None: fcf_b -= d_nwc
+        # ── FCFF = NOPAT + D&A − CapEx − ΔNWC ───────────────────────────────
+        fcf_b = nopat
+        if fcf_b is not None and da_abs  is not None: fcf_b += da_abs   # add back
+        if fcf_b is not None and cx_abs  is not None: fcf_b -= cx_abs
+        if fcf_b is not None and d_nwc   is not None: fcf_b -= d_nwc
+        # Fall back to derived FCF (OpCF − CapEx) if bridge cannot compute
         if fcf_b is None:
             fcf_b = fcf_direct.get(yr)
 
         rows.append(dict(year=yr, Revenue=r, COGS=c, SGA=s,
-                         EBITDA_s=ebitda_s, CapEx=cx_abs, dNWC=d_nwc, FCF=fcf_b))
+                         EBITDA_s=ebitda_s, DA=da_abs, EBIT=ebit,
+                         Taxes=taxes, NOPAT=nopat,
+                         CapEx=cx_abs, dNWC=d_nwc, FCF=fcf_b))
 
     df = pd.DataFrame(rows).set_index("year").sort_index(ascending=False)
     return df.head(n)
@@ -2768,7 +2794,9 @@ elif page == "💰  Model DCF":
     # ══════════════════════════════════════════════════════════════════════════
     with tab_fwd:
 
-        bridge_df = build_fcf_bridge(stmts_d, n=7)
+        # tax_user is set in tab_rev WACC inputs above; default 21% if not yet rendered
+        _bridge_tax = tax_user if "tax_user" in dir() else (wacc_auto_dict["tax_rate"])
+        bridge_df = build_fcf_bridge(stmts_d, n=7, tax_rate=_bridge_tax)
 
         if bridge_df.empty:
             st.warning(
@@ -2780,21 +2808,30 @@ elif page == "💰  Model DCF":
             st.markdown("#### 📊 FCF Bridge — Historical")
 
             bridge_years = list(bridge_df.index)   # newest first
+            # Tuple: (label, df_col, negate_display, is_subtotal)
+            # negate_display=True ⟹ show value as negative (deduction row)
             bridge_metrics = [
-                ("Revenue",  "Revenue",  False, True),
-                ("COGS",     "COGS",     False, False),
-                ("SG&A",     "SGA",      False, False),
-                ("EBITDA*",  "EBITDA_s", False, True),
-                ("CapEx",    "CapEx",    False, False),
-                ("ΔNWC",     "dNWC",     False, False),
-                ("FCF",      "FCF",      False, True),
+                ("Revenue",                     "Revenue",  False, True),
+                ("COGS",                        "COGS",     False, False),
+                ("SG&A",                        "SGA",      False, False),
+                ("EBITDA*",                     "EBITDA_s", False, True),
+                (f"− D&A",                      "DA",       True,  False),
+                ("EBIT",                        "EBIT",     False, True),
+                (f"Taxes ({_bridge_tax*100:.0f}%)", "Taxes", True,  False),
+                ("NOPAT",                       "NOPAT",    False, True),
+                ("+ D&A (add back)",            "DA",       False, False),
+                ("− CapEx",                     "CapEx",    True,  False),
+                ("ΔNWC",                        "dNWC",     False, False),
+                ("FCFF",                        "FCF",      False, True),
             ]
 
-            def _fmt_b(v) -> str:
-                """Format as $XB with sign."""
+            def _fmt_b(v, negate: bool = False) -> str:
+                """Format as $XB. negate=True forces display as negative (deduction)."""
                 if v is None or (isinstance(v, float) and (pd.isna(v))):
                     return "—"
                 v = float(v)
+                if negate:
+                    v = -abs(v)   # force negative display regardless of stored sign
                 neg = v < 0
                 a   = abs(v)
                 s   = (f"${a/1e12:.2f}T" if a >= 1e12 else
@@ -2832,31 +2869,32 @@ elif page == "💰  Model DCF":
             )
 
             bridge_rows_html = []
-            rev_by_yr = {yr: bridge_df.loc[yr, "Revenue"] for yr in bridge_years
-                         if "Revenue" in bridge_df.columns}
+            # Rows that get a top separator (new subtotal section)
+            _sep_cols = {"EBIT", "NOPAT", "FCF"}
 
-            for display_lbl, col, _neg, is_key in bridge_metrics:
+            for display_lbl, col, negate_disp, is_key in bridge_metrics:
                 if col not in bridge_df.columns:
                     continue
                 cells_b = []
-                sorted_yrs = sorted(bridge_years)  # ascending for YoY
-                yr_vals    = {yr: bridge_df.loc[yr, col] if yr in bridge_df.index else None
-                              for yr in bridge_years}
+                yr_vals = {yr: bridge_df.loc[yr, col] if yr in bridge_df.index else None
+                           for yr in bridge_years}
 
                 # Build cells newest-first
                 for i, yr in enumerate(bridge_years):
-                    val     = yr_vals.get(yr)
-                    # previous year for YoY (next in newest-first list = older)
+                    val    = yr_vals.get(yr)
                     prev_yr = bridge_years[i + 1] if i + 1 < len(bridge_years) else None
                     prev_v  = yr_vals.get(prev_yr) if prev_yr else None
-                    yoy_str = _fmt_pct(val, prev_v) if col != "dNWC" else ""
-                    val_str = _fmt_b(val)
-                    weight  = "font-weight:700;" if is_key else ""
+                    # Show YoY only on subtotal/result rows, not deductions
+                    show_yoy = is_key and col not in ("dNWC",)
+                    yoy_str  = _fmt_pct(val, prev_v) if show_yoy else ""
+                    val_str  = _fmt_b(val, negate=negate_disp)
+                    weight   = "font-weight:700;" if is_key else ""
+                    # Background hints per row type
                     bg_hint = ""
-                    if col == "EBITDA_s":
-                        bg_hint = "background:#eff6ff;"
-                    elif col == "FCF":
-                        bg_hint = "background:#f0fdf4;"
+                    if col == "EBITDA_s": bg_hint = "background:#eff6ff;"
+                    elif col == "EBIT":   bg_hint = "background:#fef9c3;"
+                    elif col == "NOPAT":  bg_hint = "background:#fef3c7;"
+                    elif col == "FCF":    bg_hint = "background:#f0fdf4;"
                     cells_b.append(
                         f'<td style="text-align:right;padding:5px 12px;'
                         f'{weight}{bg_hint}white-space:nowrap">'
@@ -2865,16 +2903,15 @@ elif page == "💰  Model DCF":
                         f'</td>'
                     )
 
-                # Separator before FCF row
-                sep = ""
-                if col == "FCF":
-                    sep = "border-top:2px solid #cbd5e1;"
-
+                # Top separator before key subtotal rows
+                sep    = "border-top:2px solid #cbd5e1;" if col in _sep_cols else ""
                 row_bg = "background:#f0f9ff;" if is_key else ""
+                lbl_color = "#0f172a"
                 bridge_rows_html.append(
                     f'<tr style="{row_bg}{sep}">'
-                    f'<td style="padding:5px 12px;color:#0f172a;white-space:nowrap;'
-                    f'{"font-weight:700;" if is_key else ""}">{display_lbl}</td>'
+                    f'<td style="padding:5px 12px;color:{lbl_color};white-space:nowrap;'
+                    f'{"font-weight:700;" if is_key else "color:#475569;"}">'
+                    f'{display_lbl}</td>'
                     + "".join(cells_b) + "</tr>"
                 )
 
@@ -2886,7 +2923,10 @@ elif page == "💰  Model DCF":
                 "</table></div>"
                 '<p style="font-size:11px;color:#94a3b8;margin-top:4px">'
                 "* EBITDA(simplified) = Revenue − COGS − SG&A. "
-                "FCF(bridge) = EBITDA* − CapEx − ΔNWC.</p>"
+                f"EBIT = EBITDA − D&A. "
+                f"Taxes = EBIT × {_bridge_tax*100:.0f}% (effective rate). "
+                "NOPAT = EBIT × (1 − Tax Rate). "
+                "FCFF = NOPAT + D&A − CapEx − ΔNWC.</p>"
             )
             st.markdown(bridge_html, unsafe_allow_html=True)
 
