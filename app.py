@@ -1146,6 +1146,137 @@ def compute_price_metrics(stmts: dict, prices: dict) -> None:
         stmts["derived"] = combined.sort_index(ascending=False)
 
 
+# ── DCF helper functions ───────────────────────────────────────────────────────
+
+@st.cache_data(ttl=3_600, show_spinner=False)
+def load_beta(ticker: str) -> float:
+    """Fetch beta from yfinance."""
+    try:
+        import yfinance as yf
+        b = yf.Ticker(ticker).info.get("beta")
+        return float(b) if b and b > 0 else 1.0
+    except Exception:
+        return 1.0
+
+
+def _dcf_series(stmts: dict, metric: str) -> pd.Series:
+    """Pull metric as pd.Series with guaranteed int64 index, NaN-cleaned."""
+    s = get_stmt_series(stmts, metric)
+    if s is None or s.empty:
+        return pd.Series(dtype=float)
+    return pd.Series({int(k): float(v) for k, v in s.items() if pd.notna(v)}, dtype=float)
+
+
+def compute_wacc_auto(stmts: dict, market_cap: float, beta: float,
+                      rf: float, erp: float) -> dict:
+    """Compute WACC components from EDGAR data + market inputs."""
+    r_e = rf + beta * erp   # CAPM cost of equity
+
+    # Cost of Debt = avg(Interest Expense) / avg(Long Term Debt) — last 3 yrs
+    iex = _dcf_series(stmts, "Interest Expense").sort_index(ascending=False).head(3)
+    ltd = _dcf_series(stmts, "Long Term Debt").sort_index(ascending=False).head(3)
+    iex_mean = iex[iex > 0].mean() if not iex.empty else 0
+    ltd_mean = ltd[ltd > 0].mean() if not ltd.empty else 0
+    r_d = float(iex_mean / ltd_mean) if ltd_mean > 0 and iex_mean > 0 else 0.04
+    r_d = min(max(r_d, 0.01), 0.25)
+
+    # Effective Tax Rate = Income Tax / (Net Income + Income Tax)
+    itx = _dcf_series(stmts, "Income Tax").sort_index(ascending=False)
+    ni  = _dcf_series(stmts, "Net Income").sort_index(ascending=False)
+    itx1 = itx.iloc[0] if not itx.empty else None
+    ni1  = ni.iloc[0]  if not ni.empty  else None
+    if itx1 and itx1 > 0 and ni1 is not None and abs(ni1 + itx1) > 0:
+        tax_rate = abs(itx1) / abs(ni1 + itx1)
+        tax_rate = min(max(tax_rate, 0.0), 0.50)
+    else:
+        tax_rate = 0.21
+
+    # Capital structure: market equity + book debt
+    ltd1     = (ltd.iloc[0] if not ltd.empty else 0.0) or 0.0
+    total_v  = market_cap + ltd1
+    e_wt = market_cap / total_v if total_v > 0 else 1.0
+    d_wt = ltd1       / total_v if total_v > 0 else 0.0
+
+    wacc = e_wt * r_e + d_wt * r_d * (1.0 - tax_rate)
+    return dict(wacc=wacc, r_e=r_e, r_d=r_d, tax_rate=tax_rate,
+                e_wt=e_wt, d_wt=d_wt, ltd=ltd1)
+
+
+def reverse_dcf_fcf(market_cap: float, fcf: float, wacc: float) -> float | None:
+    """Implied growth: MC = FCF(1+g)/(WACC-g)  => g = (MC·WACC - FCF)/(MC + FCF)"""
+    denom = market_cap + fcf
+    if denom <= 0 or wacc <= 0:
+        return None
+    g = (market_cap * wacc - fcf) / denom
+    return g if (-0.30 < g < wacc) else None
+
+
+def reverse_dcf_ddm(price: float, dps: float, r_e: float) -> float | None:
+    """Implied growth: P = DPS(1+g)/(r_e-g)  => g = (P·r_e - DPS)/(P + DPS)"""
+    denom = price + dps
+    if denom <= 0 or r_e <= 0 or dps <= 0:
+        return None
+    g = (price * r_e - dps) / denom
+    return g if (-0.30 < g < r_e) else None
+
+
+def build_fcf_bridge(stmts: dict, n: int = 7) -> pd.DataFrame:
+    """
+    Build simplified FCF bridge:
+      Revenue − COGS − SG&A = EBITDA(simplified)
+                             − CapEx_abs − ΔNWC = FCF(bridge)
+    Year selection anchors on the series with the most-recent data among
+    Revenue, FCF (derived), CapEx — handles financial-sector companies
+    (e.g. AXP) whose Revenue XBRL tags only appear in older filings.
+    Returns DataFrame indexed by fiscal year (newest first).
+    """
+    rev        = _dcf_series(stmts, "Revenue")
+    cogs       = _dcf_series(stmts, "COGS")
+    sga        = _dcf_series(stmts, "SG&A")
+    capex      = _dcf_series(stmts, "CapEx")
+    ca         = _dcf_series(stmts, "Current Assets")
+    cash       = _dcf_series(stmts, "Cash")
+    cl         = _dcf_series(stmts, "Current Liabilities")
+    fcf_direct = _dcf_series(stmts, "FCF")          # derived FCF = OpCF − CapEx
+
+    # ── Pick the anchor series: whichever has the most-recent fiscal year ──────
+    candidates = [(s, s.index.max()) for s in [rev, fcf_direct, capex] if not s.empty]
+    if not candidates:
+        return pd.DataFrame()
+    anchor = max(candidates, key=lambda t: t[1])[0]
+    all_years = sorted(anchor.index, reverse=True)[:n]
+
+    rows, nwc_prev = [], None
+
+    for yr in sorted(all_years):        # ascending to compute delta
+        r  = rev.get(yr);   c = cogs.get(yr);  s = sga.get(yr)
+        cx = capex.get(yr)
+
+        ebitda_s = r
+        if c is not None: ebitda_s = ebitda_s - c if ebitda_s is not None else None
+        if s is not None: ebitda_s = ebitda_s - s if ebitda_s is not None else None
+
+        _ca = ca.get(yr); _cas = cash.get(yr); _cl = cl.get(yr)
+        nwc = (_ca - (_cas or 0)) - _cl if (_ca is not None and _cl is not None) else None
+        d_nwc = (nwc - nwc_prev) if (nwc is not None and nwc_prev is not None) else None
+        nwc_prev = nwc
+
+        cx_abs = abs(cx) if cx is not None else None
+
+        # Try bridge FCF first; fall back to derived FCF for this year
+        fcf_b = ebitda_s
+        if fcf_b is not None and cx_abs is not None: fcf_b -= cx_abs
+        if fcf_b is not None and d_nwc  is not None: fcf_b -= d_nwc
+        if fcf_b is None:
+            fcf_b = fcf_direct.get(yr)
+
+        rows.append(dict(year=yr, Revenue=r, COGS=c, SGA=s,
+                         EBITDA_s=ebitda_s, CapEx=cx_abs, dNWC=d_nwc, FCF=fcf_b))
+
+    df = pd.DataFrame(rows).set_index("year").sort_index(ascending=False)
+    return df.head(n)
+
+
 # ── Filings data helpers ───────────────────────────────────────────────────────
 def period_label(form: str, date_str: str) -> str:
     if not date_str:
@@ -1351,7 +1482,7 @@ with st.sidebar:
     # ── Top-level navigation (persists across reruns) ────────────────────────
     page = st.radio(
         "Page",
-        options=["📁  Filings", "📈  KPI Explorer"],
+        options=["📁  Filings", "📈  KPI Explorer", "💰  Model DCF"],
         label_visibility="collapsed",
         horizontal=True,
         key="nav_page",
@@ -1425,7 +1556,7 @@ with st.sidebar:
                     st.rerun()
 
     # ── KPI Explorer sidebar ─────────────────────────────────────────────────
-    else:
+    elif page == "📈  KPI Explorer":
         if st.session_state.kpi_tickers:
             st.markdown("**Loaded companies**")
             for tk in st.session_state.kpi_tickers:
@@ -1441,6 +1572,10 @@ with st.sidebar:
             "Enter one or more tickers in the main area and click **📊 Load** "
             "to start exploring financial KPIs."
         )
+
+    # ── DCF Model sidebar ─────────────────────────────────────────────────────
+    elif page == "💰  Model DCF":
+        st.info("Uses data loaded in **📈 KPI Explorer**")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1615,7 +1750,7 @@ if page == "📁  Filings":
 # ══════════════════════════════════════════════════════════════════════════════
 #  PAGE: KPI EXPLORER
 # ══════════════════════════════════════════════════════════════════════════════
-else:
+elif page == "📈  KPI Explorer":
     st.markdown("## 📈 KPI Explorer")
     st.caption(
         "Load one or more companies, then explore any financial KPI from their "
@@ -2318,3 +2453,623 @@ else:
                 file_name=f"{'_'.join(kpi_tickers)}_{safe_concept}.csv",
                 mime="text/csv",
             )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  PAGE: DCF MODEL
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "💰  Model DCF":
+
+    st.markdown("## 💰 Model DCF")
+
+    # ── Guard: need companies loaded ─────────────────────────────────────────
+    dcf_tickers: list = st.session_state.get("kpi_tickers", [])
+    dcf_stmts:   dict = st.session_state.get("kpi_stmts",   {})
+    dcf_prices:  dict = st.session_state.get("kpi_prices",  {})
+
+    if not dcf_tickers or not dcf_stmts:
+        st.info(
+            "Load companies in **📈 KPI Explorer** first → click 📈 KPI Explorer "
+            "in the navigation bar above, enter a ticker, and click 📊 Load."
+        )
+        st.stop()
+
+    # ── Company selector ─────────────────────────────────────────────────────
+    if len(dcf_tickers) > 1:
+        dcf_tk = st.selectbox(
+            "Select company",
+            options=dcf_tickers,
+            key="dcf_company_sel",
+        )
+    else:
+        dcf_tk = dcf_tickers[0]
+
+    stmts_d = dcf_stmts.get(dcf_tk, {})
+    prices_d = dcf_prices.get(dcf_tk, {})
+
+    if not stmts_d:
+        st.warning(f"No statement data found for **{dcf_tk}**. Load it in KPI Explorer first.")
+        st.stop()
+
+    # ── Gather latest price & market cap ─────────────────────────────────────
+    price_series = _dcf_series(stmts_d, "Market Cap")
+    mc_series    = price_series  # Market Cap already in derived
+
+    # Latest market cap (most recent year)
+    latest_mc = None
+    if not mc_series.empty:
+        latest_mc = float(mc_series.sort_index(ascending=False).iloc[0])
+
+    # Latest stock price from kpi_prices
+    latest_price = None
+    if prices_d:
+        px_s = pd.Series({int(k): float(v) for k, v in prices_d.items()}, dtype=float)
+        if not px_s.empty:
+            latest_price = float(px_s.sort_index(ascending=False).iloc[0])
+
+    # ── FCF: prefer derived["FCF"], else bridge ───────────────────────────────
+    fcf_series = _dcf_series(stmts_d, "FCF")
+    latest_fcf = None
+    if not fcf_series.empty:
+        latest_fcf = float(fcf_series.sort_index(ascending=False).iloc[0])
+
+    # ── DPS (Dividends Per Share) ─────────────────────────────────────────────
+    div_series = _dcf_series(stmts_d, "Dividends Paid")
+    sh_series  = _dcf_series(stmts_d, "Diluted Shares")
+    latest_dps = None
+    if not div_series.empty and not sh_series.empty:
+        yr_div = div_series.sort_index(ascending=False)
+        yr_sh  = sh_series.sort_index(ascending=False)
+        common = sorted(set(yr_div.index) & set(yr_sh.index), reverse=True)
+        if common:
+            yr0 = common[0]
+            d0  = yr_div.get(yr0)
+            s0  = yr_sh.get(yr0)
+            if d0 is not None and s0 is not None and s0 != 0:
+                latest_dps = abs(float(d0)) / abs(float(s0))
+
+    # ── Auto-compute WACC defaults ─────────────────────────────────────────────
+    beta_auto = load_beta(dcf_tk)
+    rf_def    = 4.5   # %
+    erp_def   = 5.5   # %
+    mc_for_wacc = latest_mc if latest_mc and latest_mc > 0 else 1e11
+    wacc_auto_dict = compute_wacc_auto(
+        stmts_d, mc_for_wacc, beta_auto, rf_def / 100, erp_def / 100
+    )
+
+    # ── Inner tabs: Reverse DCF  |  Forward DCF ──────────────────────────────
+    tab_rev, tab_fwd = st.tabs(["⏪ Reverse DCF", "📊 Forward DCF Model"])
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TAB 1 — REVERSE DCF
+    # ══════════════════════════════════════════════════════════════════════════
+    with tab_rev:
+
+        # ── WACC Inputs expander ──────────────────────────────────────────────
+        with st.expander("⚙️ WACC & Discount Rate Inputs", expanded=True):
+
+            st.markdown("**Cost of Equity (CAPM)**")
+            coe_c1, coe_c2, coe_c3 = st.columns(3)
+
+            with coe_c1:
+                dcf_rf = st.number_input(
+                    "Risk-Free Rate %",
+                    min_value=0.0, max_value=20.0,
+                    value=rf_def, step=0.1, format="%.1f",
+                    key="dcf_rf",
+                )
+            with coe_c2:
+                dcf_beta = st.number_input(
+                    "Beta",
+                    min_value=0.0, max_value=5.0,
+                    value=round(beta_auto, 2), step=0.05, format="%.2f",
+                    key="dcf_beta",
+                )
+            with coe_c3:
+                dcf_erp = st.number_input(
+                    "Equity Risk Premium %",
+                    min_value=0.0, max_value=20.0,
+                    value=erp_def, step=0.1, format="%.1f",
+                    key="dcf_erp",
+                )
+
+            r_e_computed = (dcf_rf + dcf_beta * dcf_erp) / 100
+            st.info(
+                f"**Cost of Equity** = Risk-Free Rate + Beta × ERP = "
+                f"{dcf_rf:.1f}% + {dcf_beta:.2f} × {dcf_erp:.1f}% = "
+                f"**{r_e_computed*100:.2f}%**"
+            )
+
+            st.markdown("**Cost of Debt & Tax Rate**")
+            cod_c1, cod_c2, cod_c3 = st.columns(3)
+
+            with cod_c1:
+                dcf_cod = st.number_input(
+                    "Cost of Debt %",
+                    min_value=0.0, max_value=25.0,
+                    value=round(wacc_auto_dict["r_d"] * 100, 1),
+                    step=0.1, format="%.1f",
+                    key="dcf_cod",
+                )
+            with cod_c2:
+                dcf_tax = st.number_input(
+                    "Tax Rate %",
+                    min_value=0.0, max_value=50.0,
+                    value=round(wacc_auto_dict["tax_rate"] * 100, 1),
+                    step=0.5, format="%.1f",
+                    key="dcf_tax",
+                )
+            with cod_c3:
+                st.metric(
+                    "Equity Weight",
+                    f"{wacc_auto_dict['e_wt']*100:.1f}%",
+                    delta=f"Debt: {wacc_auto_dict['d_wt']*100:.1f}%",
+                )
+
+            # Recompute WACC with user inputs
+            r_e_user  = r_e_computed
+            r_d_user  = dcf_cod / 100
+            tax_user  = dcf_tax / 100
+            e_wt_user = wacc_auto_dict["e_wt"]
+            d_wt_user = wacc_auto_dict["d_wt"]
+            wacc_user = e_wt_user * r_e_user + d_wt_user * r_d_user * (1.0 - tax_user)
+
+            st.markdown(
+                f"**WACC** = {e_wt_user*100:.1f}% × {r_e_user*100:.2f}% + "
+                f"{d_wt_user*100:.1f}% × {r_d_user*100:.1f}% × (1 − {tax_user*100:.1f}%) = "
+                f'<span style="font-size:1.15em;font-weight:700;color:#3b82f6">'
+                f"**{wacc_user*100:.2f}%**</span>",
+                unsafe_allow_html=True,
+            )
+
+        # ── Key metrics row ───────────────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("#### Key Inputs")
+
+        km1, km2, km3, km4 = st.columns(4)
+        km1.metric(
+            "Stock Price (latest)",
+            f"${latest_price:,.2f}" if latest_price else "—",
+        )
+        km2.metric(
+            "Market Cap",
+            f"${latest_mc/1e9:.1f}B" if latest_mc else "—",
+        )
+        km3.metric(
+            "Latest FCF",
+            f"${latest_fcf/1e9:.1f}B" if latest_fcf is not None else "—",
+        )
+        km4.metric(
+            "DPS (latest)",
+            f"${latest_dps:.2f}" if latest_dps else "—",
+        )
+
+        # ── Reverse DCF Results ───────────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("#### ⏪ Implied Growth Rates")
+
+        rcol1, rcol2 = st.columns(2)
+
+        # Model A — FCF (discounted at WACC)
+        with rcol1:
+            st.markdown("##### Model A — FCF / WACC")
+            st.info(
+                "Market Cap = FCF × (1+g) / (WACC − g)\n\n"
+                "Solving: **g = (MC × WACC − FCF) / (MC + FCF)**"
+            )
+            if latest_mc and latest_fcf is not None and wacc_user > 0:
+                g_fcf = reverse_dcf_fcf(latest_mc, latest_fcf, wacc_user)
+                if g_fcf is not None:
+                    color = "#10b981" if g_fcf >= 0 else "#ef4444"
+                    st.markdown(
+                        f'<div style="text-align:center;padding:18px;'
+                        f'background:#f0f9ff;border-radius:10px;'
+                        f'border:2px solid #3b82f6">'
+                        f'<p style="margin:0;color:#64748b;font-size:13px">'
+                        f'Implied FCF Growth Rate</p>'
+                        f'<p style="margin:4px 0 0;font-size:2.2em;'
+                        f'font-weight:800;color:{color}">'
+                        f'{g_fcf*100:+.1f}%</p>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.warning("Cannot compute — check inputs (WACC > g required)")
+            else:
+                st.caption("Requires Market Cap, FCF, and WACC > 0")
+
+        # Model B — DDM (discounted at Cost of Equity)
+        with rcol2:
+            st.markdown("##### Model B — Dividends / DDM")
+            st.info(
+                "Price = DPS × (1+g) / (Cost of Equity − g)\n\n"
+                "Solving: **g = (P × r_e − DPS) / (P + DPS)**"
+            )
+            if latest_dps and latest_dps > 0 and latest_price and r_e_user > 0:
+                g_ddm = reverse_dcf_ddm(latest_price, latest_dps, r_e_user)
+                if g_ddm is not None:
+                    color = "#10b981" if g_ddm >= 0 else "#ef4444"
+                    st.markdown(
+                        f'<div style="text-align:center;padding:18px;'
+                        f'background:#f0fff4;border-radius:10px;'
+                        f'border:2px solid #10b981">'
+                        f'<p style="margin:0;color:#64748b;font-size:13px">'
+                        f'Implied Dividend Growth Rate</p>'
+                        f'<p style="margin:4px 0 0;font-size:2.2em;'
+                        f'font-weight:800;color:{color}">'
+                        f'{g_ddm*100:+.1f}%</p>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.warning("Cannot compute — check inputs (r_e > g required)")
+            else:
+                st.markdown(
+                    '<div style="text-align:center;padding:18px;'
+                    'background:#f8fafc;border-radius:10px;'
+                    'border:1px dashed #cbd5e1;color:#94a3b8">'
+                    'Company does not pay dividends</div>',
+                    unsafe_allow_html=True,
+                )
+
+        # ── FCF Model Sensitivity Table ───────────────────────────────────────
+        if latest_mc and latest_fcf is not None and wacc_user > 0:
+            st.markdown("---")
+            st.markdown("#### 🔢 Sensitivity — Implied FCF Growth Rate")
+            st.caption(
+                "Rows = WACC ± 1pp / ±0.5pp | "
+                "Columns = Market Cap ± 10% / ±5%"
+            )
+
+            wacc_offsets  = [-0.010, -0.005, 0.000, +0.005, +0.010]
+            mc_multipliers = [0.90, 0.95, 1.00, 1.05, 1.10]
+
+            sens_rows = []
+            for w_off in wacc_offsets:
+                w_val = wacc_user + w_off
+                row_data = {"WACC": f"{w_val*100:.2f}%"}
+                for mc_mult in mc_multipliers:
+                    mc_var = latest_mc * mc_mult
+                    g_var  = reverse_dcf_fcf(mc_var, latest_fcf, w_val)
+                    row_data[f"MC ×{mc_mult:.2f}"] = (
+                        f"{g_var*100:+.1f}%" if g_var is not None else "—"
+                    )
+                sens_rows.append(row_data)
+
+            sens_df = pd.DataFrame(sens_rows).set_index("WACC")
+            st.dataframe(sens_df, use_container_width=True)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TAB 2 — FORWARD DCF MODEL
+    # ══════════════════════════════════════════════════════════════════════════
+    with tab_fwd:
+
+        bridge_df = build_fcf_bridge(stmts_d, n=7)
+
+        if bridge_df.empty:
+            st.warning(
+                "Not enough Revenue data to build the FCF bridge for this company. "
+                "Make sure it is loaded in KPI Explorer."
+            )
+        else:
+            # ── FCF Bridge table (HTML styled) ───────────────────────────────
+            st.markdown("#### 📊 FCF Bridge — Historical")
+
+            bridge_years = list(bridge_df.index)   # newest first
+            bridge_metrics = [
+                ("Revenue",  "Revenue",  False, True),
+                ("COGS",     "COGS",     False, False),
+                ("SG&A",     "SGA",      False, False),
+                ("EBITDA*",  "EBITDA_s", False, True),
+                ("CapEx",    "CapEx",    False, False),
+                ("ΔNWC",     "dNWC",     False, False),
+                ("FCF",      "FCF",      False, True),
+            ]
+
+            def _fmt_b(v) -> str:
+                """Format as $XB with sign."""
+                if v is None or (isinstance(v, float) and (pd.isna(v))):
+                    return "—"
+                v = float(v)
+                neg = v < 0
+                a   = abs(v)
+                s   = (f"${a/1e12:.2f}T" if a >= 1e12 else
+                       f"${a/1e9:.1f}B"  if a >= 1e9  else
+                       f"${a/1e6:.0f}M"  if a >= 1e6  else f"${a:,.0f}")
+                return f"({s})" if neg else s
+
+            def _fmt_pct(cur, prev) -> str:
+                if cur is None or prev is None:
+                    return ""
+                try:
+                    cur_f, prev_f = float(cur), float(prev)
+                    if prev_f == 0:
+                        return ""
+                    yoy = (cur_f - prev_f) / abs(prev_f) * 100
+                    color = "#10b981" if yoy >= 0 else "#ef4444"
+                    return (
+                        f'<span style="font-size:10px;color:{color}">'
+                        f'{yoy:+.1f}%</span>'
+                    )
+                except Exception:
+                    return ""
+
+            # Build HTML table header
+            yr_heads_b = "".join(
+                f'<th style="text-align:right;padding:6px 12px;color:#475569;'
+                f'font-weight:600;font-size:12px;white-space:nowrap">{y}</th>'
+                for y in bridge_years
+            )
+            bridge_header = (
+                '<tr style="background:#f1f5f9;border-bottom:2px solid #cbd5e1">'
+                '<th style="text-align:left;padding:6px 12px;color:#475569;'
+                'font-weight:600;font-size:12px;white-space:nowrap">Metric ($B)</th>'
+                + yr_heads_b + "</tr>"
+            )
+
+            bridge_rows_html = []
+            rev_by_yr = {yr: bridge_df.loc[yr, "Revenue"] for yr in bridge_years
+                         if "Revenue" in bridge_df.columns}
+
+            for display_lbl, col, _neg, is_key in bridge_metrics:
+                if col not in bridge_df.columns:
+                    continue
+                cells_b = []
+                sorted_yrs = sorted(bridge_years)  # ascending for YoY
+                yr_vals    = {yr: bridge_df.loc[yr, col] if yr in bridge_df.index else None
+                              for yr in bridge_years}
+
+                # Build cells newest-first
+                for i, yr in enumerate(bridge_years):
+                    val     = yr_vals.get(yr)
+                    # previous year for YoY (next in newest-first list = older)
+                    prev_yr = bridge_years[i + 1] if i + 1 < len(bridge_years) else None
+                    prev_v  = yr_vals.get(prev_yr) if prev_yr else None
+                    yoy_str = _fmt_pct(val, prev_v) if col != "dNWC" else ""
+                    val_str = _fmt_b(val)
+                    weight  = "font-weight:700;" if is_key else ""
+                    bg_hint = ""
+                    if col == "EBITDA_s":
+                        bg_hint = "background:#eff6ff;"
+                    elif col == "FCF":
+                        bg_hint = "background:#f0fdf4;"
+                    cells_b.append(
+                        f'<td style="text-align:right;padding:5px 12px;'
+                        f'{weight}{bg_hint}white-space:nowrap">'
+                        f'{val_str}'
+                        f'{"<br>" + yoy_str if yoy_str else ""}'
+                        f'</td>'
+                    )
+
+                # Separator before FCF row
+                sep = ""
+                if col == "FCF":
+                    sep = "border-top:2px solid #cbd5e1;"
+
+                row_bg = "background:#f0f9ff;" if is_key else ""
+                bridge_rows_html.append(
+                    f'<tr style="{row_bg}{sep}">'
+                    f'<td style="padding:5px 12px;color:#0f172a;white-space:nowrap;'
+                    f'{"font-weight:700;" if is_key else ""}">{display_lbl}</td>'
+                    + "".join(cells_b) + "</tr>"
+                )
+
+            bridge_html = (
+                '<div style="overflow-x:auto;margin-bottom:8px">'
+                '<table style="width:100%;border-collapse:collapse;font-size:13px">'
+                f"<thead>{bridge_header}</thead>"
+                f"<tbody>{''.join(bridge_rows_html)}</tbody>"
+                "</table></div>"
+                '<p style="font-size:11px;color:#94a3b8;margin-top:4px">'
+                "* EBITDA(simplified) = Revenue − COGS − SG&A. "
+                "FCF(bridge) = EBITDA* − CapEx − ΔNWC.</p>"
+            )
+            st.markdown(bridge_html, unsafe_allow_html=True)
+
+            # ── Projection Assumptions ────────────────────────────────────────
+            st.markdown("---")
+            st.markdown("#### ⚙️ Projection Assumptions")
+
+            # Propose default growth from last 3 yrs avg FCF YoY
+            # Prefer derived FCF series (Operating CF - CapEx); fall back to bridge
+            _fcf_for_g = fcf_series.sort_index(ascending=False)
+            if _fcf_for_g.empty:
+                _fcf_for_g = bridge_df["FCF"].dropna().sort_index(ascending=False)
+            fcf_vals   = _fcf_for_g.dropna()
+            proposed_g = 5.0   # fallback default %
+            if len(fcf_vals) >= 3:
+                try:
+                    yoy_rates = []
+                    for i in range(len(fcf_vals) - 1):
+                        cur_v  = float(fcf_vals.iloc[i])
+                        prev_v = float(fcf_vals.iloc[i + 1])
+                        if prev_v != 0 and not pd.isna(cur_v) and not pd.isna(prev_v):
+                            yoy_rates.append((cur_v - prev_v) / abs(prev_v) * 100)
+                    if yoy_rates:
+                        avg_g = float(pd.Series(yoy_rates[:3]).mean())
+                        proposed_g = round(max(-5.0, min(35.0, avg_g)), 1)
+                except Exception:
+                    pass
+
+            pa_c1, pa_c2, pa_c3, pa_c4 = st.columns(4)
+            with pa_c1:
+                fwd_g1 = st.number_input(
+                    "Year 1 Growth %",
+                    min_value=-50.0, max_value=100.0,
+                    value=proposed_g, step=0.5, format="%.1f",
+                    key="dcf_fwd_g1",
+                )
+            with pa_c2:
+                fwd_g2 = st.number_input(
+                    "Year 2 Growth %",
+                    min_value=-50.0, max_value=100.0,
+                    value=proposed_g, step=0.5, format="%.1f",
+                    key="dcf_fwd_g2",
+                )
+            with pa_c3:
+                fwd_g3 = st.number_input(
+                    "Year 3 Growth %",
+                    min_value=-50.0, max_value=100.0,
+                    value=max(proposed_g * 0.7, 2.0), step=0.5, format="%.1f",
+                    key="dcf_fwd_g3",
+                )
+            with pa_c4:
+                fwd_gt = st.number_input(
+                    "Terminal Growth %",
+                    min_value=0.0, max_value=10.0,
+                    value=3.0, step=0.1, format="%.1f",
+                    key="dcf_fwd_gt",
+                )
+
+            # ── DCF Output Table ──────────────────────────────────────────────
+            st.markdown("---")
+            st.markdown("#### 📋 DCF Projection")
+
+            base_fcf = latest_fcf if latest_fcf is not None else 0.0
+            growth_rates = [fwd_g1 / 100, fwd_g2 / 100, fwd_g3 / 100]
+            terminal_g   = fwd_gt / 100
+            wacc_fwd     = wacc_user
+
+            # Project FCFs
+            proj_fcf = []
+            fcf_cur  = base_fcf
+            for g in growth_rates:
+                fcf_cur = fcf_cur * (1 + g)
+                proj_fcf.append(fcf_cur)
+
+            # Terminal value (Gordon Growth)
+            if wacc_fwd > terminal_g:
+                terminal_fcf = proj_fcf[-1] * (1 + terminal_g)
+                tv = terminal_fcf / (wacc_fwd - terminal_g)
+            else:
+                tv = None
+
+            # Present values
+            pv_fcfs = []
+            for t_idx, fcf_t in enumerate(proj_fcf, start=1):
+                pv = fcf_t / ((1 + wacc_fwd) ** t_idx)
+                pv_fcfs.append(pv)
+
+            pv_tv = tv / ((1 + wacc_fwd) ** len(proj_fcf)) if tv is not None else None
+
+            # Build output table
+            out_cols = ["Base"] + [f"Year {i}" for i in range(1, len(proj_fcf) + 1)] + ["Terminal"]
+            fcf_row  = (
+                [f"${base_fcf/1e9:.2f}B"]
+                + [f"${v/1e9:.2f}B" for v in proj_fcf]
+                + [f"${tv/1e9:.2f}B" if tv is not None else "—"]
+            )
+            g_row = (
+                ["—"]
+                + [f"{g*100:.1f}%" for g in growth_rates]
+                + [f"{terminal_g*100:.1f}%"]
+            )
+            pv_factor_row = (
+                ["1.000"]
+                + [f"{1/((1+wacc_fwd)**t):.4f}" for t in range(1, len(proj_fcf) + 1)]
+                + [f"{1/((1+wacc_fwd)**len(proj_fcf)):.4f}" if pv_tv is not None else "—"]
+            )
+            pv_row = (
+                ["—"]
+                + [f"${v/1e9:.2f}B" for v in pv_fcfs]
+                + [f"${pv_tv/1e9:.2f}B" if pv_tv is not None else "—"]
+            )
+
+            proj_table = pd.DataFrame(
+                {
+                    "Metric":       ["FCF ($B)", "Growth Rate", "PV Factor", "Present Value ($B)"],
+                    **{col: [fcf_row[i], g_row[i], pv_factor_row[i], pv_row[i]]
+                       for i, col in enumerate(out_cols)},
+                }
+            ).set_index("Metric")
+
+            st.dataframe(proj_table, use_container_width=True)
+
+            # ── Intrinsic Value Summary ───────────────────────────────────────
+            st.markdown("---")
+            st.markdown("#### 💡 Intrinsic Value Summary")
+
+            sum_pv_fcf = sum(pv_fcfs)
+            total_iv   = sum_pv_fcf + (pv_tv if pv_tv is not None else 0.0)
+
+            # Per-share value
+            sh_latest = None
+            sh_s2 = _dcf_series(stmts_d, "Diluted Shares")
+            if not sh_s2.empty:
+                sh_latest = float(sh_s2.sort_index(ascending=False).iloc[0])
+
+            iv_per_share = total_iv / sh_latest if sh_latest and sh_latest > 0 else None
+
+            sv1, sv2, sv3, sv4 = st.columns(4)
+            sv1.metric(
+                "Sum of PV (FCFs)",
+                f"${sum_pv_fcf/1e9:.1f}B",
+            )
+            sv2.metric(
+                "PV of Terminal Value",
+                f"${pv_tv/1e9:.1f}B" if pv_tv is not None else "—",
+            )
+            sv3.metric(
+                "Total Intrinsic Value",
+                f"${total_iv/1e9:.1f}B",
+            )
+            sv4.metric(
+                "Intrinsic Value / Share",
+                f"${iv_per_share:.2f}" if iv_per_share else "—",
+            )
+
+            # Upside / downside vs current price
+            if latest_price and iv_per_share:
+                upside = (iv_per_share - latest_price) / latest_price * 100
+                color_up = "#10b981" if upside >= 0 else "#ef4444"
+                label_up = "Upside" if upside >= 0 else "Downside"
+                st.markdown(
+                    f'<div style="text-align:center;margin:12px 0;padding:14px;'
+                    f'background:#f8fafc;border-radius:10px;'
+                    f'border:2px solid {color_up}">'
+                    f'<p style="margin:0;color:#64748b;font-size:13px">'
+                    f'Current Price: <strong>${latest_price:,.2f}</strong> | '
+                    f'Intrinsic Value: <strong>${iv_per_share:.2f}</strong></p>'
+                    f'<p style="margin:6px 0 0;font-size:1.8em;'
+                    f'font-weight:800;color:{color_up}">'
+                    f'{label_up}: {upside:+.1f}%</p>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+            # ── Bar chart: PV breakdown ───────────────────────────────────────
+            st.markdown("---")
+            st.markdown("#### 📊 PV Breakdown")
+
+            import plotly.graph_objects as go  # already imported, safe re-import
+
+            bar_labels = [f"Year {i+1}" for i in range(len(pv_fcfs))]
+            bar_values = [v / 1e9 for v in pv_fcfs]
+            if pv_tv is not None:
+                bar_labels.append("Terminal Value")
+                bar_values.append(pv_tv / 1e9)
+
+            bar_colors = ["#3b82f6"] * len(pv_fcfs) + (
+                ["#10b981"] if pv_tv is not None else []
+            )
+
+            fig_pv = go.Figure(
+                go.Bar(
+                    x=bar_labels,
+                    y=bar_values,
+                    marker_color=bar_colors,
+                    text=[f"${v:.1f}B" for v in bar_values],
+                    textposition="outside",
+                )
+            )
+            fig_pv.update_layout(
+                title="Present Value Breakdown ($B)",
+                yaxis_title="Present Value ($B)",
+                plot_bgcolor="white",
+                paper_bgcolor="white",
+                font=dict(family="sans-serif", size=13),
+                margin=dict(t=50, b=40, l=50, r=20),
+                showlegend=False,
+            )
+            fig_pv.update_yaxes(gridcolor="#f1f5f9")
+            st.plotly_chart(fig_pv, use_container_width=True)
