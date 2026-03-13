@@ -1508,7 +1508,7 @@ with st.sidebar:
     # ── Top-level navigation (persists across reruns) ────────────────────────
     page = st.radio(
         "Page",
-        options=["📁  Filings", "📈  KPI Explorer", "💰  Model DCF"],
+        options=["📁  Filings", "📈  KPI Explorer", "💰  Model DCF", "📉  Drawdown"],
         label_visibility="collapsed",
         horizontal=True,
         key="nav_page",
@@ -1601,7 +1601,21 @@ with st.sidebar:
 
     # ── DCF Model sidebar ─────────────────────────────────────────────────────
     elif page == "💰  Model DCF":
+        _dcf_tks = st.session_state.get("kpi_tickers", [])
+        _dcf_fts = st.session_state.get("kpi_facts",   {})
+        if _dcf_tks:
+            _sel_tk = st.session_state.get("dcf_company_sel", _dcf_tks[0])
+            if _sel_tk not in _dcf_tks:
+                _sel_tk = _dcf_tks[0]
+            _ename = _dcf_fts.get(_sel_tk, {}).get("entityName", _sel_tk)
+            st.markdown(f"### 🏢 {_ename}")
+            st.caption(f"`{_sel_tk}`")
+            st.divider()
         st.info("Uses data loaded in **📈 KPI Explorer**")
+
+    # ── Drawdown sidebar ──────────────────────────────────────────────────────
+    elif page == "📉  Drawdown":
+        st.info("Enter a ticker to analyze historical drawdowns and option strike levels.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2486,14 +2500,13 @@ elif page == "📈  KPI Explorer":
 # ══════════════════════════════════════════════════════════════════════════════
 elif page == "💰  Model DCF":
 
-    st.markdown("## 💰 Model DCF")
-
     # ── Guard: need companies loaded ─────────────────────────────────────────
     dcf_tickers: list = st.session_state.get("kpi_tickers", [])
     dcf_stmts:   dict = st.session_state.get("kpi_stmts",   {})
     dcf_prices:  dict = st.session_state.get("kpi_prices",  {})
 
     if not dcf_tickers or not dcf_stmts:
+        st.markdown("## 💰 Model DCF")
         st.info(
             "Load companies in **📈 KPI Explorer** first → click 📈 KPI Explorer "
             "in the navigation bar above, enter a ticker, and click 📊 Load."
@@ -2509,6 +2522,16 @@ elif page == "💰  Model DCF":
         )
     else:
         dcf_tk = dcf_tickers[0]
+
+    # ── Page header with company name ─────────────────────────────────────────
+    _dcf_facts   = st.session_state.get("kpi_facts", {})
+    _dcf_ename   = _dcf_facts.get(dcf_tk, {}).get("entityName", dcf_tk)
+    st.markdown(
+        f"## 💰 DCF Model — "
+        f"<span style='color:#0369a1'>{_dcf_ename}</span> "
+        f"<span style='font-size:0.75em;color:#94a3b8;font-weight:400'>({dcf_tk})</span>",
+        unsafe_allow_html=True,
+    )
 
     stmts_d = dcf_stmts.get(dcf_tk, {})
     prices_d = dcf_prices.get(dcf_tk, {})
@@ -3169,3 +3192,325 @@ elif page == "💰  Model DCF":
             )
             fig_pv.update_yaxes(gridcolor="#f1f5f9")
             st.plotly_chart(fig_pv, use_container_width=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  PAGE: DRAWDOWN ANALYSIS
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "📉  Drawdown":
+
+    st.markdown("## 📉 Drawdown Analysis")
+    st.caption(
+        "Historical intra-year drawdown distribution and option strike price calculator. "
+        "Data sourced from yfinance."
+    )
+
+    # ── Ticker input ──────────────────────────────────────────────────────────
+    dd_c1, dd_c2, dd_c3 = st.columns([2, 1, 4])
+    with dd_c1:
+        dd_ticker = st.text_input(
+            "Stock Ticker",
+            value=st.session_state.get("dd_ticker", ""),
+            placeholder="RCL, AAPL, TSLA…",
+            max_chars=10,
+            key="dd_ticker_input",
+        ).strip().upper()
+    with dd_c2:
+        st.markdown("<br>", unsafe_allow_html=True)
+        dd_run = st.button("📊 Analyze", type="primary", use_container_width=True)
+
+    if dd_run and dd_ticker:
+        st.session_state["dd_ticker"] = dd_ticker
+        st.session_state["dd_data"]   = None   # force re-download
+
+    dd_ticker_active = st.session_state.get("dd_ticker", "")
+    if not dd_ticker_active:
+        st.info("Enter a ticker above and click **📊 Analyze** to begin.")
+        st.stop()
+
+    # ── Download / cache price data ───────────────────────────────────────────
+    @st.cache_data(ttl=3600, show_spinner=False)
+    def _dd_fetch(ticker: str) -> pd.DataFrame | None:
+        try:
+            import yfinance as yf
+            tk_obj = yf.Ticker(ticker)
+            hist   = tk_obj.history(period="max", interval="1d", auto_adjust=True)
+            if hist.empty:
+                return None
+            hist.index = pd.to_datetime(hist.index).tz_localize(None)
+            df = hist[["Close"]].rename(columns={"Close": "price"}).copy()
+            df.index.name = "date"
+            return df
+        except Exception:
+            return None
+
+    with st.spinner(f"Downloading price history for **{dd_ticker_active}**…"):
+        dd_df = _dd_fetch(dd_ticker_active)
+
+    if dd_df is None or dd_df.empty:
+        st.error(f"Could not download price data for **{dd_ticker_active}**. Check the ticker and try again.")
+        st.stop()
+
+    # ── Compute drawdown metrics ──────────────────────────────────────────────
+    dd_df = dd_df.copy()
+    dd_df["year"] = dd_df.index.year
+
+    # Cumulative all-time drawdown: (price / running_max) - 1
+    dd_df["cum_max"]         = dd_df["price"].cummax()
+    dd_df["drawdown_cum"]    = (dd_df["price"] / dd_df["cum_max"] - 1).clip(upper=0)
+
+    # Intra-year (YTD) drawdown: (price / ytd_max_up_to_this_day) - 1
+    dd_df["ytd_max"] = dd_df.groupby("year")["price"].transform(
+        lambda s: s.expanding().max()
+    )
+    dd_df["drawdown_yr"] = (dd_df["price"] / dd_df["ytd_max"] - 1).clip(upper=0)
+
+    # Zero → blank (only keep true drawdowns)
+    dd_df["drawdown_yr_neg"] = dd_df["drawdown_yr"].where(dd_df["drawdown_yr"] < 0)
+
+    # ── Year-by-year worst drawdown table ────────────────────────────────────
+    yr_table = (
+        dd_df.groupby("year")
+        .agg(
+            min_drawdown_cum=("drawdown_cum",    "min"),
+            min_drawdown_yr =("drawdown_yr_neg", "min"),
+        )
+        .reset_index()
+    )
+    # Only keep years with at least some data (full or partial)
+    yr_table = yr_table.dropna(subset=["min_drawdown_yr"])
+    yr_table = yr_table.sort_values("year", ascending=False)
+
+    # ── Frequency table ───────────────────────────────────────────────────────
+    # Buckets based on intra-year worst drawdown per year
+    _dd_buckets = [
+        ("0% to -5%",      0.0,  -0.05),
+        ("-5% to -10%",   -0.05, -0.10),
+        ("-10% to -15%",  -0.10, -0.15),
+        ("-15% to -20%",  -0.15, -0.20),
+        ("-20% to -25%",  -0.20, -0.25),
+        ("-25% to -30%",  -0.25, -0.30),
+        ("-30% to -40%",  -0.30, -0.40),
+        ("-40% to -60%",  -0.40, -0.60),
+        ("< -60%",        -0.60, -1.00),
+    ]
+
+    worst_yr = yr_table["min_drawdown_yr"].dropna().values
+    n_years  = len(worst_yr)
+
+    freq_rows = []
+    for label, lo, hi in _dd_buckets:
+        count = int(((worst_yr <= lo) & (worst_yr > hi)).sum())
+        prob  = count / n_years if n_years > 0 else 0.0
+        freq_rows.append({"Bucket": label, "Years": count, "Probability": prob})
+    freq_df = pd.DataFrame(freq_rows)
+
+    # ── Strike price inputs ───────────────────────────────────────────────────
+    st.markdown("---")
+    sp_c1, sp_c2 = st.columns([1, 2])
+    with sp_c1:
+        # 52-week high as reference
+        one_yr_ago  = dd_df.index.max() - pd.DateOffset(years=1)
+        recent_data = dd_df[dd_df.index >= one_yr_ago]
+        ref_high    = float(recent_data["price"].max()) if not recent_data.empty else float(dd_df["price"].iloc[-1])
+        ref_date    = recent_data["price"].idxmax() if not recent_data.empty else dd_df.index[-1]
+        last_price  = float(dd_df["price"].iloc[-1])
+
+        st.markdown(f"**Reference Price (52-wk High)**")
+        st.metric(
+            label=f"{dd_ticker_active} — 52-week High",
+            value=f"${ref_high:,.2f}",
+            delta=f"Last: ${last_price:,.2f} ({(last_price/ref_high - 1)*100:+.1f}%)",
+        )
+        st.caption(f"High reached: {ref_date.strftime('%Y-%m-%d')}")
+
+    with sp_c2:
+        st.markdown("**Select Drawdown Levels for Strike Prices**")
+        dd_levels_raw = st.multiselect(
+            "Drawdown levels",
+            options=[5, 10, 15, 20, 25, 30, 35, 40, 50, 60],
+            default=[15, 20, 30, 40],
+            format_func=lambda x: f"-{x}%",
+            label_visibility="collapsed",
+            key="dd_levels",
+        )
+        dd_levels = sorted(dd_levels_raw) if dd_levels_raw else [15, 20, 30, 40]
+
+    # Build strike price table
+    strike_rows = []
+    for lvl in dd_levels:
+        pct      = lvl / 100
+        strike   = ref_high * (1 - pct)
+        dist_cur = (strike / last_price - 1) * 100
+        # probability: P(worst intra-year ≤ -pct) from historical data
+        hist_prob = float((worst_yr <= -pct).mean()) if n_years > 0 else 0.0
+        strike_rows.append({
+            "Drawdown": f"-{lvl}%",
+            "Strike Price": f"${strike:,.2f}",
+            "From Current": f"{dist_cur:+.1f}%",
+            "Hist. Prob (annual)": f"{hist_prob:.0%}",
+        })
+    strike_df = pd.DataFrame(strike_rows)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # CHART SECTION (shown at the top of results)
+    # ══════════════════════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.markdown("### 📈 Price History & Intra-Year Drawdown")
+
+    # Filter to last N years for chart readability
+    chart_years = st.slider(
+        "Chart history (years)", min_value=3, max_value=max(10, int(dd_df["year"].nunique())),
+        value=min(10, int(dd_df["year"].nunique())),
+        key="dd_chart_years",
+    )
+    chart_cutoff = dd_df.index.max() - pd.DateOffset(years=chart_years)
+    chart_df     = dd_df[dd_df.index >= chart_cutoff].copy()
+
+    fig_dd = go.Figure()
+
+    # Trace 1: Price (primary y-axis)
+    fig_dd.add_trace(go.Scatter(
+        x=chart_df.index,
+        y=chart_df["price"],
+        name="Price",
+        line=dict(color="#3b82f6", width=1.5),
+        yaxis="y1",
+    ))
+
+    # Trace 2: Strike levels (horizontal lines on price axis)
+    for lvl in dd_levels:
+        strike_val = ref_high * (1 - lvl / 100)
+        fig_dd.add_hline(
+            y=strike_val,
+            line=dict(color="#f59e0b", width=1, dash="dot"),
+            annotation_text=f"-{lvl}%  ${strike_val:,.0f}",
+            annotation_position="right",
+            annotation_font_size=10,
+            annotation_font_color="#b45309",
+        )
+
+    # 52-wk high line
+    fig_dd.add_hline(
+        y=ref_high,
+        line=dict(color="#10b981", width=1.5, dash="dash"),
+        annotation_text=f"52-wk High ${ref_high:,.0f}",
+        annotation_position="right",
+        annotation_font_size=10,
+        annotation_font_color="#065f46",
+    )
+
+    # Trace 3: Intra-year drawdown (secondary y-axis, filled area)
+    fig_dd.add_trace(go.Scatter(
+        x=chart_df.index,
+        y=chart_df["drawdown_yr"] * 100,
+        name="Intra-Year Drawdown",
+        fill="tozeroy",
+        fillcolor="rgba(239,68,68,0.15)",
+        line=dict(color="rgba(239,68,68,0.6)", width=1),
+        yaxis="y2",
+    ))
+
+    fig_dd.update_layout(
+        xaxis=dict(title="", showgrid=False, rangeslider=dict(visible=False)),
+        yaxis=dict(
+            title="Price ($)",
+            side="left",
+            showgrid=True,
+            gridcolor="#f1f5f9",
+        ),
+        yaxis2=dict(
+            title="Drawdown (%)",
+            side="right",
+            overlaying="y",
+            showgrid=False,
+            tickformat=".0f",
+            ticksuffix="%",
+        ),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        font=dict(family="sans-serif", size=12),
+        margin=dict(t=40, b=40, l=60, r=120),
+        hovermode="x unified",
+    )
+    st.plotly_chart(fig_dd, use_container_width=True)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # RESULTS: Strike Prices, Frequency Table, Year-by-Year Table
+    # ══════════════════════════════════════════════════════════════════════════
+    res_c1, res_c2 = st.columns([1, 1])
+
+    with res_c1:
+        st.markdown("### 🎯 Strike Prices")
+        st.caption(f"Based on 52-week high of **${ref_high:,.2f}** ({ref_date.strftime('%Y-%m-%d')})")
+        st.dataframe(
+            strike_df,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    with res_c2:
+        st.markdown("### 📊 Drawdown Frequency Table")
+        st.caption(
+            f"Intra-year worst drawdown per calendar year · "
+            f"{n_years} years of data"
+        )
+        # Style the frequency table
+        freq_display = freq_df.copy()
+        freq_display["Probability"] = freq_display["Probability"].map(lambda x: f"{x:.1%}")
+        st.dataframe(
+            freq_display,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    # ── Bar chart: frequency distribution ────────────────────────────────────
+    st.markdown("---")
+    st.markdown("### 📉 Drawdown Distribution (by Year)")
+
+    fig_freq = go.Figure()
+    bar_colors_freq = []
+    for _, row in freq_df.iterrows():
+        bucket = row["Bucket"]
+        if "<" in bucket or "-40" in bucket or "-60" in bucket:
+            bar_colors_freq.append("#dc2626")
+        elif "-25" in bucket or "-30" in bucket:
+            bar_colors_freq.append("#f97316")
+        elif "-15" in bucket or "-20" in bucket:
+            bar_colors_freq.append("#f59e0b")
+        else:
+            bar_colors_freq.append("#10b981")
+
+    fig_freq.add_trace(go.Bar(
+        x=freq_df["Bucket"],
+        y=freq_df["Years"],
+        marker_color=bar_colors_freq,
+        text=freq_df.apply(
+            lambda r: f"{r['Years']}y<br>{r['Probability']:.0%}", axis=1
+        ),
+        textposition="outside",
+        name="# of Years",
+    ))
+    fig_freq.update_layout(
+        xaxis=dict(title="Max Intra-Year Drawdown Bucket"),
+        yaxis=dict(title="Number of Years", gridcolor="#f1f5f9"),
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        font=dict(family="sans-serif", size=12),
+        margin=dict(t=40, b=60, l=50, r=20),
+        showlegend=False,
+    )
+    st.plotly_chart(fig_freq, use_container_width=True)
+
+    # ── Year-by-year table ────────────────────────────────────────────────────
+    with st.expander("📅 Year-by-Year Worst Drawdown", expanded=False):
+        yr_display = yr_table.copy()
+        yr_display["min_drawdown_cum"] = yr_display["min_drawdown_cum"].map(
+            lambda x: f"{x:.1%}" if pd.notna(x) else "—"
+        )
+        yr_display["min_drawdown_yr"] = yr_display["min_drawdown_yr"].map(
+            lambda x: f"{x:.1%}" if pd.notna(x) else "—"
+        )
+        yr_display.columns = ["Year", "Worst Cumulative Drawdown", "Worst Intra-Year Drawdown"]
+        st.dataframe(yr_display, use_container_width=True, hide_index=True)
