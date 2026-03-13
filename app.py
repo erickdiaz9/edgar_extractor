@@ -1508,7 +1508,7 @@ with st.sidebar:
     # ── Top-level navigation (persists across reruns) ────────────────────────
     page = st.radio(
         "Page",
-        options=["📁  Filings", "📈  KPI Explorer", "💰  Model DCF", "📉  Drawdown"],
+        options=["📁  Filings", "📈  KPI Explorer", "💰  Model DCF", "📉  Drawdown", "📊  Returns"],
         label_visibility="collapsed",
         horizontal=True,
         key="nav_page",
@@ -1616,6 +1616,13 @@ with st.sidebar:
     # ── Drawdown sidebar ──────────────────────────────────────────────────────
     elif page == "📉  Drawdown":
         st.info("Enter a ticker to analyze historical drawdowns and option strike levels.")
+
+    # ── Total Return sidebar ──────────────────────────────────────────────────
+    elif page == "📊  Returns":
+        st.info(
+            "Enter any ticker to compute buy-and-hold IRR vs S&P 500, "
+            "with optional dividend reinvestment and bootstrap simulation."
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -3514,3 +3521,453 @@ elif page == "📉  Drawdown":
         )
         yr_display.columns = ["Year", "Worst Cumulative Drawdown", "Worst Intra-Year Drawdown"]
         st.dataframe(yr_display, use_container_width=True, hide_index=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  PAGE: TOTAL RETURN ANALYSIS
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "📊  Returns":
+    import datetime as _dt
+    import numpy as _np
+
+    st.markdown("## 📊 Total Return Analysis")
+    st.caption(
+        "Buy on a specific date, hold 3Y / 5Y / 10Y, compute CAGR (IRR) vs S&P 500. "
+        "Bootstrap simulation estimates expected returns across all historical entry points."
+    )
+
+    # ── Inputs ────────────────────────────────────────────────────────────────
+    inp_c1, inp_c2, inp_c3 = st.columns([2, 2, 1])
+    with inp_c1:
+        tr_ticker = st.text_input(
+            "Stock Ticker",
+            value=st.session_state.get("tr_ticker_val", ""),
+            placeholder="RCL, AAPL, MSFT…",
+            max_chars=10,
+            key="tr_ticker_inp",
+        ).strip().upper()
+    with inp_c2:
+        _max_entry = _dt.date.today() - _dt.timedelta(days=3 * 365)
+        tr_date = st.date_input(
+            "Entry Date",
+            value=st.session_state.get("tr_date_val", _dt.date(2015, 1, 2)),
+            min_value=_dt.date(1990, 1, 1),
+            max_value=_max_entry,
+            key="tr_date_inp",
+        )
+    with inp_c3:
+        st.markdown("<br>", unsafe_allow_html=True)
+        tr_run = st.button("📊 Analyze", type="primary", use_container_width=True)
+
+    # ── Settings ──────────────────────────────────────────────────────────────
+    set_c1, set_c2, set_c3 = st.columns([2, 2, 2])
+    with set_c1:
+        tr_periods = st.multiselect(
+            "Holding Periods",
+            options=[3, 5, 10],
+            default=[3, 5, 10],
+            format_func=lambda x: f"{x}Y",
+            key="tr_periods",
+        )
+    with set_c2:
+        inc_div = st.checkbox("Include Dividends & Distributions", value=True, key="tr_inc_div")
+        reinvest_div = False
+        if inc_div:
+            reinvest_div = st.checkbox("Reinvest Dividends (DRIP)", value=True, key="tr_reinvest")
+    with set_c3:
+        tr_cash_rate = 0.0
+        if inc_div and not reinvest_div:
+            tr_cash_rate = st.number_input(
+                "Cash Rate (%/yr)",
+                min_value=0.0, max_value=20.0, value=4.0, step=0.1,
+                key="tr_cash_rate",
+                help="Interest rate at which un-reinvested dividends accumulate to the exit date",
+            ) / 100.0
+        tr_n_boot = int(st.number_input(
+            "Bootstrap Samples", min_value=100, max_value=2000, value=500, step=100, key="tr_n_boot",
+        ))
+
+    if tr_run and tr_ticker:
+        st.session_state["tr_ticker_val"] = tr_ticker
+        st.session_state["tr_date_val"]   = tr_date
+
+    tr_ticker_active = st.session_state.get("tr_ticker_val", "")
+    if not tr_ticker_active:
+        st.info("Enter a ticker and click **📊 Analyze** to begin.")
+        st.stop()
+
+    tr_periods_active = sorted(tr_periods) if tr_periods else [3, 5, 10]
+    _TR_BENCH = "SPY"
+    _TR_INIT  = 10_000.0
+
+    # ── Data fetch ────────────────────────────────────────────────────────────
+    @st.cache_data(ttl=3600, show_spinner=False)
+    def _tr_fetch(ticker: str) -> pd.DataFrame | None:
+        try:
+            import yfinance as yf
+            hist = yf.Ticker(ticker).history(
+                period="max", interval="1d", auto_adjust=True, actions=True,
+            )
+            if hist.empty:
+                return None
+            hist.index = pd.to_datetime(hist.index).tz_localize(None)
+            return hist[["Close", "Dividends"]].copy()
+        except Exception:
+            return None
+
+    with st.spinner(f"Downloading {tr_ticker_active} & {_TR_BENCH}…"):
+        tr_df_stock = _tr_fetch(tr_ticker_active)
+        tr_df_bench = _tr_fetch(_TR_BENCH)
+
+    if tr_df_stock is None or tr_df_stock.empty:
+        st.error(f"No data for **{tr_ticker_active}**.")
+        st.stop()
+    if tr_df_bench is None or tr_df_bench.empty:
+        st.error(f"No data for benchmark **{_TR_BENCH}**.")
+        st.stop()
+
+    # ── Core return helper (used for single-date analysis) ────────────────────
+    def _tr_compute(hist: pd.DataFrame, start, end, incl: bool, drip: bool, cr: float):
+        """Compute total return and CAGR for a buy-hold interval."""
+        dates = hist.index
+        if pd.Timestamp(end) > dates[-1]:
+            return None
+        si = min(dates.searchsorted(pd.Timestamp(start)), len(dates) - 1)
+        ei = min(dates.searchsorted(pd.Timestamp(end)),   len(dates) - 1)
+        s_ts, e_ts = dates[si], dates[ei]
+        if e_ts <= s_ts:
+            return None
+        sp = float(hist.loc[s_ts, "Close"])
+        ep = float(hist.loc[e_ts, "Close"])
+        yrs = (e_ts - s_ts).days / 365.25
+        if not incl:
+            terminal = ep
+            div_val  = 0.0
+        else:
+            mask = (hist.index > s_ts) & (hist.index <= e_ts)
+            divs = hist.loc[mask, "Dividends"]
+            divs = divs[divs > 0]
+            if drip:
+                shares = 1.0
+                for dd, da in divs.items():
+                    px = float(hist.loc[dd, "Close"])
+                    if px > 0:
+                        shares += shares * da / px
+                terminal = shares * ep
+                div_val  = terminal - ep
+            else:
+                acc = sum(float(da) * (1 + cr) ** ((e_ts - dd).days / 365.25)
+                          for dd, da in divs.items())
+                terminal = ep + acc
+                div_val  = acc
+        tr   = terminal / sp - 1
+        cagr = (1 + tr) ** (1 / yrs) - 1 if yrs > 0 else 0.0
+        return dict(
+            start_ts=s_ts, end_ts=e_ts,
+            start_price=sp, end_price=ep,
+            terminal=terminal, total_return=tr, cagr=cagr,
+            years=yrs, div_contribution=div_val,
+        )
+
+    # ── Bootstrap (self-contained for cache compatibility) ────────────────────
+    @st.cache_data(ttl=3600, show_spinner=False)
+    def _tr_bootstrap(
+        df_s: pd.DataFrame, df_b: pd.DataFrame,
+        yrs: int, n: int,
+        incl: bool, drip: bool, cr: float, seed: int = 42,
+    ):
+        import numpy as _np2
+
+        def _ret(hist, start, end):
+            dates = hist.index
+            if pd.Timestamp(end) > dates[-1]:
+                return None
+            si = min(dates.searchsorted(pd.Timestamp(start)), len(dates) - 1)
+            ei = min(dates.searchsorted(pd.Timestamp(end)),   len(dates) - 1)
+            s_ts, e_ts = dates[si], dates[ei]
+            if e_ts <= s_ts:
+                return None
+            sp = float(hist.loc[s_ts, "Close"])
+            ep = float(hist.loc[e_ts, "Close"])
+            yh = (e_ts - s_ts).days / 365.25
+            if not incl:
+                terminal = ep
+            else:
+                mask = (hist.index > s_ts) & (hist.index <= e_ts)
+                divs = hist.loc[mask, "Dividends"]
+                divs = divs[divs > 0]
+                if drip:
+                    sh = 1.0
+                    for dd, da in divs.items():
+                        px = float(hist.loc[dd, "Close"])
+                        if px > 0:
+                            sh += sh * da / px
+                    terminal = sh * ep
+                else:
+                    acc = sum(float(da) * (1 + cr) ** ((e_ts - dd).days / 365.25)
+                              for dd, da in divs.items())
+                    terminal = ep + acc
+            tr = terminal / sp - 1
+            return (1 + tr) ** (1 / yh) - 1 if yh > 0 else 0.0
+
+        _np2.random.seed(seed)
+        cutoff = df_s.index[-1] - pd.DateOffset(years=yrs)
+        valid  = df_s.index[df_s.index <= cutoff]
+        if len(valid) < 30:
+            return None
+        replace = n > len(valid)
+        idxs    = _np2.random.choice(len(valid), size=n, replace=replace)
+        sampled = valid[idxs]
+
+        sc, bc = [], []
+        for d in sampled:
+            end_d = d + pd.DateOffset(years=yrs)
+            rs = _ret(df_s, d, end_d)
+            rb = _ret(df_b, d, end_d)
+            if rs is not None:
+                sc.append(rs)
+            if rb is not None:
+                bc.append(rb)
+        return {"stock": sc, "bench": bc, "n_valid": len(valid)}
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # SECTION 1 — SINGLE-DATE ANALYSIS
+    # ══════════════════════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.markdown(f"### 📅 Single Entry: {tr_date.strftime('%B %d, %Y')}")
+
+    def _tr_pct_color(v):
+        return "#16a34a" if v >= 0 else "#dc2626"
+
+    def _tr_card(res, label, ticker_color="#0369a1"):
+        tr = res["total_return"]
+        cr = res["cagr"]
+        return (
+            f"<div style='border:1px solid #e2e8f0;border-radius:12px;padding:18px'>"
+            f"<div style='font-size:1.05em;font-weight:700;color:{ticker_color}'>{label}</div>"
+            f"<div style='display:flex;justify-content:space-between;margin-top:12px;font-size:0.85em'>"
+            f"<div><div style='color:#94a3b8;font-size:0.78em'>Entry</div>"
+            f"<div style='font-weight:600'>${res['start_price']:,.2f}</div>"
+            f"<div style='color:#94a3b8;font-size:0.72em'>{res['start_ts'].strftime('%Y-%m-%d')}</div></div>"
+            f"<div style='text-align:right'><div style='color:#94a3b8;font-size:0.78em'>Exit</div>"
+            f"<div style='font-weight:600'>${res['end_price']:,.2f}</div>"
+            f"<div style='color:#94a3b8;font-size:0.72em'>{res['end_ts'].strftime('%Y-%m-%d')}</div></div>"
+            f"</div>"
+            f"<div style='display:flex;justify-content:space-around;margin-top:14px;"
+            f"padding-top:12px;border-top:1px solid #f1f5f9'>"
+            f"<div style='text-align:center'>"
+            f"<div style='font-size:0.7em;color:#94a3b8'>Total Return</div>"
+            f"<div style='font-size:1.45em;font-weight:800;color:{_tr_pct_color(tr)}'>{tr:+.1%}</div>"
+            f"</div>"
+            f"<div style='text-align:center'>"
+            f"<div style='font-size:0.7em;color:#94a3b8'>CAGR</div>"
+            f"<div style='font-size:1.45em;font-weight:800;color:{_tr_pct_color(cr)}'>{cr:+.1%}</div>"
+            f"</div>"
+            f"<div style='text-align:center'>"
+            f"<div style='font-size:0.7em;color:#94a3b8'>$10k →</div>"
+            f"<div style='font-size:1.2em;font-weight:700;color:{_tr_pct_color(tr)}'>"
+            f"${_TR_INIT * (1 + tr):,.0f}</div>"
+            f"</div>"
+            f"</div></div>"
+        )
+
+    def _tr_growth_series(hist, start_ts, end_ts, incl, drip, cr, label):
+        """Portfolio growth of $_TR_INIT over time."""
+        mask = (hist.index >= start_ts) & (hist.index <= end_ts)
+        sub  = hist.loc[mask].copy()
+        if sub.empty:
+            return None
+        sp0    = float(sub["Close"].iloc[0])
+        shares = _TR_INIT / sp0
+        acc_cash = 0.0
+        vals = []
+        for dt, row in sub.iterrows():
+            div = float(row.get("Dividends", 0.0))
+            if incl and div > 0:
+                if drip:
+                    px = float(row["Close"])
+                    if px > 0:
+                        shares += shares * div / px
+                else:
+                    acc_cash += shares * div   # cash collected (no time-value for chart)
+            vals.append(shares * float(row["Close"]) + (acc_cash if (incl and not drip) else 0.0))
+        return pd.Series(vals, index=sub.index, name=label)
+
+    for yrs in tr_periods_active:
+        exit_d = pd.Timestamp(tr_date) + pd.DateOffset(years=yrs)
+        rs = _tr_compute(tr_df_stock, tr_date, exit_d, inc_div, reinvest_div, tr_cash_rate)
+        rb = _tr_compute(tr_df_bench, tr_date, exit_d, inc_div, reinvest_div, tr_cash_rate)
+
+        st.markdown(f"#### {yrs}-Year Hold")
+
+        if rs is None:
+            avail = (tr_df_stock.index[-1] - pd.Timestamp(tr_date)).days / 365.25
+            st.warning(
+                f"**{yrs}Y not available** — only {avail:.1f}Y of history past this entry date."
+            )
+            st.markdown("---")
+            continue
+
+        # Cards row
+        cc1, cc2 = st.columns(2)
+        with cc1:
+            st.markdown(_tr_card(rs, tr_ticker_active, "#0369a1"), unsafe_allow_html=True)
+        with cc2:
+            if rb:
+                st.markdown(_tr_card(rb, f"{_TR_BENCH}  (S&P 500)", "#374151"), unsafe_allow_html=True)
+            else:
+                st.info("No benchmark data for this period.")
+
+        # Alpha row
+        if rb:
+            alpha = rs["cagr"] - rb["cagr"]
+            alpha_color = _tr_pct_color(alpha)
+            alpha_label = "outperformed" if alpha >= 0 else "underperformed"
+            st.markdown(
+                f"<div style='text-align:center;padding:8px;background:#f8fafc;"
+                f"border-radius:8px;margin-top:6px'>"
+                f"<span style='font-size:0.85em;color:#64748b'>{tr_ticker_active} "
+                f"{alpha_label} {_TR_BENCH} by </span>"
+                f"<span style='font-size:1.1em;font-weight:700;color:{alpha_color}'>"
+                f"{abs(alpha):.2%}/yr</span>"
+                f"<span style='font-size:0.85em;color:#64748b'> (alpha = "
+                f"<b style='color:{alpha_color}'>{alpha:+.2%}</b> CAGR)</span></div>",
+                unsafe_allow_html=True,
+            )
+
+        # Portfolio growth chart
+        st.markdown("<br>", unsafe_allow_html=True)
+        s_gr = _tr_growth_series(tr_df_stock, rs["start_ts"], rs["end_ts"], inc_div, reinvest_div, tr_cash_rate, tr_ticker_active)
+        b_gr = _tr_growth_series(tr_df_bench, rs["start_ts"], rs["end_ts"], inc_div, reinvest_div, tr_cash_rate, _TR_BENCH) if rb else None
+
+        if s_gr is not None and not s_gr.empty:
+            fig_gr = go.Figure()
+            fig_gr.add_trace(go.Scatter(
+                x=s_gr.index, y=s_gr.values, name=tr_ticker_active,
+                line=dict(color="#3b82f6", width=2),
+                hovertemplate="%{x|%Y-%m-%d}<br>$%{y:,.0f}<extra></extra>",
+            ))
+            if b_gr is not None:
+                fig_gr.add_trace(go.Scatter(
+                    x=b_gr.index, y=b_gr.values, name=f"{_TR_BENCH} (S&P 500)",
+                    line=dict(color="#94a3b8", width=1.5, dash="dash"),
+                    hovertemplate="%{x|%Y-%m-%d}<br>$%{y:,.0f}<extra></extra>",
+                ))
+            fig_gr.add_hline(
+                y=_TR_INIT, line=dict(color="#cbd5e1", width=1, dash="dot"),
+                annotation_text=f"Initial ${_TR_INIT:,.0f}",
+                annotation_font_size=10, annotation_font_color="#94a3b8",
+            )
+            fig_gr.update_layout(
+                title=f"${_TR_INIT:,.0f} invested {rs['start_ts'].strftime('%Y-%m-%d')} → {rs['end_ts'].strftime('%Y-%m-%d')} ({yrs}Y)",
+                yaxis=dict(title="Portfolio Value ($)", tickprefix="$", gridcolor="#f1f5f9"),
+                xaxis=dict(showgrid=False),
+                plot_bgcolor="white", paper_bgcolor="white",
+                font=dict(family="sans-serif", size=12),
+                margin=dict(t=50, b=30, l=70, r=20),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                hovermode="x unified",
+            )
+            st.plotly_chart(fig_gr, use_container_width=True, key=f"tr_gr_{yrs}")
+
+        st.markdown("---")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # SECTION 2 — BOOTSTRAP EXPECTED-RETURN DISTRIBUTION
+    # ══════════════════════════════════════════════════════════════════════════
+    st.markdown("### 🎲 Bootstrap: Expected-Return Distribution")
+    st.caption(
+        f"**{tr_n_boot:,}** random entry dates sampled uniformly from the full price history. "
+        f"Each sample uses the same settings (dividends, DRIP) as the single-date analysis above."
+    )
+
+    with st.spinner(f"Running bootstrap ({tr_n_boot:,} samples × {len(tr_periods_active)} periods)…"):
+        _boot_results = {
+            yrs: _tr_bootstrap(
+                tr_df_stock, tr_df_bench,
+                yrs, tr_n_boot,
+                inc_div, reinvest_div, tr_cash_rate,
+            )
+            for yrs in tr_periods_active
+        }
+
+    for yrs in tr_periods_active:
+        br = _boot_results.get(yrs)
+        if br is None or not br["stock"]:
+            st.warning(f"Insufficient history for {yrs}Y bootstrap.")
+            continue
+
+        st.markdown(f"#### {yrs}-Year Holding Period")
+        sc = _np.array(br["stock"]) * 100   # CAGR in %
+        bc = _np.array(br["bench"]) * 100
+
+        # Pairwise beat-SPY (same sampled dates, so arrays are aligned)
+        n_pair   = min(len(sc), len(bc))
+        pct_beat = float((sc[:n_pair] > bc[:n_pair]).mean()) if n_pair > 0 else float("nan")
+
+        # Stats table
+        def _tr_stats(arr, label, is_stock):
+            row = {
+                "Ticker":      label,
+                "Samples":     len(arr),
+                "Mean CAGR":   f"{_np.mean(arr):+.1f}%",
+                "Median":      f"{_np.median(arr):+.1f}%",
+                "Std Dev":     f"{_np.std(arr):.1f}%",
+                "P10":         f"{_np.percentile(arr, 10):+.1f}%",
+                "P25":         f"{_np.percentile(arr, 25):+.1f}%",
+                "P75":         f"{_np.percentile(arr, 75):+.1f}%",
+                "P90":         f"{_np.percentile(arr, 90):+.1f}%",
+                "% Positive":  f"{(arr > 0).mean():.0%}",
+            }
+            if is_stock:
+                row["% Beats SPY"] = f"{pct_beat:.0%}" if not _np.isnan(pct_beat) else "—"
+            else:
+                row["% Beats SPY"] = "—"
+            return row
+
+        st.dataframe(
+            pd.DataFrame([
+                _tr_stats(sc, tr_ticker_active, True),
+                _tr_stats(bc, _TR_BENCH,         False),
+            ]),
+            use_container_width=True, hide_index=True,
+        )
+
+        # Overlapping histogram
+        fig_bt = go.Figure()
+        fig_bt.add_trace(go.Histogram(
+            x=sc, name=tr_ticker_active, nbinsx=50,
+            marker_color="rgba(59,130,246,0.70)", opacity=0.80,
+        ))
+        fig_bt.add_trace(go.Histogram(
+            x=bc, name=f"{_TR_BENCH} (S&P 500)", nbinsx=50,
+            marker_color="rgba(148,163,184,0.65)", opacity=0.75,
+        ))
+        # Mean verticals
+        fig_bt.add_vline(
+            x=float(_np.mean(sc)), line=dict(color="#2563eb", width=2, dash="dash"),
+            annotation_text=f" {tr_ticker_active} mean: {_np.mean(sc):+.1f}%",
+            annotation_position="top right", annotation_font_color="#2563eb", annotation_font_size=11,
+        )
+        fig_bt.add_vline(
+            x=float(_np.mean(bc)), line=dict(color="#475569", width=2, dash="dash"),
+            annotation_text=f" {_TR_BENCH} mean: {_np.mean(bc):+.1f}%",
+            annotation_position="top left",  annotation_font_color="#475569", annotation_font_size=11,
+        )
+        fig_bt.add_vline(
+            x=0, line=dict(color="#ef4444", width=1, dash="dot"),
+            annotation_text=" 0%", annotation_position="bottom right",
+            annotation_font_color="#ef4444", annotation_font_size=10,
+        )
+        fig_bt.update_layout(
+            barmode="overlay",
+            title=f"{yrs}Y CAGR Distribution — {len(sc):,} bootstrap samples  |  {tr_ticker_active} vs {_TR_BENCH}",
+            xaxis=dict(title="Annualized Return CAGR (%)", ticksuffix="%"),
+            yaxis=dict(title="# Samples", gridcolor="#f1f5f9"),
+            plot_bgcolor="white", paper_bgcolor="white",
+            font=dict(family="sans-serif", size=12),
+            margin=dict(t=60, b=40, l=60, r=20),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        st.plotly_chart(fig_bt, use_container_width=True, key=f"tr_bt_{yrs}")
+        st.markdown("---")
