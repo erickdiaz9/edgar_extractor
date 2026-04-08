@@ -4006,7 +4006,14 @@ elif page == "🎯  Scorecard":
         init_db, get_sp500_list, sp500_count, upsert_sp500_companies, upsert_kpis,
         get_all_runs, get_run, create_run, save_answer, finalize_run,
         mark_run_failed, get_answers, compute_scores, CATEGORY_WEIGHTS,
+        gcs_download,
     )
+
+    # Download DB from GCS once per session (no-op if GCS not configured)
+    if not st.session_state.get("_sc_gcs_loaded"):
+        gcs_download()
+        st.session_state["_sc_gcs_loaded"] = True
+
     init_db()
 
     # ── Questions data ─────────────────────────────────────────────────────────

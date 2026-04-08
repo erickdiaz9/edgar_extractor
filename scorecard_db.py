@@ -1,12 +1,65 @@
 """
 scorecard_db.py — SQLite persistence layer for the Scorecard feature.
 All database access for: S&P 500 cache, scorecard runs, and individual answers.
+
+GCS sync: if st.secrets contains [gcs] bucket + credentials, the SQLite file is
+downloaded from GCS on startup and re-uploaded after every write operation.
 """
 import sqlite3
 import os
 from datetime import datetime
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "scorecard.db")
+GCS_BLOB_NAME = "scorecard.db"
+
+
+# ── GCS helpers ───────────────────────────────────────────────────────────────
+
+def _gcs_client():
+    """Return (client, bucket) or (None, None) if GCS is not configured."""
+    try:
+        import streamlit as st
+        from google.cloud import storage
+        from google.oauth2 import service_account
+        import json
+
+        cfg = st.secrets.get("gcs", {})
+        bucket_name = cfg.get("bucket", "")
+        creds_raw = cfg.get("credentials", "")
+        if not bucket_name or not creds_raw:
+            return None, None
+
+        creds_dict = json.loads(creds_raw) if isinstance(creds_raw, str) else dict(creds_raw)
+        creds = service_account.Credentials.from_service_account_info(creds_dict)
+        client = storage.Client(credentials=creds, project=creds_dict.get("project_id"))
+        return client, client.bucket(bucket_name)
+    except Exception:
+        return None, None
+
+
+def gcs_download():
+    """Download scorecard.db from GCS if it exists. Call once at app startup."""
+    client, bucket = _gcs_client()
+    if bucket is None:
+        return
+    try:
+        blob = bucket.blob(GCS_BLOB_NAME)
+        if blob.exists():
+            blob.download_to_filename(DB_PATH)
+    except Exception:
+        pass  # Fall back to local/empty DB
+
+
+def gcs_upload():
+    """Upload current scorecard.db to GCS. Called after every write."""
+    client, bucket = _gcs_client()
+    if bucket is None:
+        return
+    try:
+        blob = bucket.blob(GCS_BLOB_NAME)
+        blob.upload_from_filename(DB_PATH)
+    except Exception:
+        pass
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sp500_cache (
@@ -81,6 +134,7 @@ def upsert_sp500_companies(rows: list[dict]):
             """,
             rows,
         )
+    gcs_upload()
 
 
 def upsert_kpis(rows: list[dict]):
@@ -99,6 +153,7 @@ def upsert_kpis(rows: list[dict]):
             """,
             [{**r, "ts": ts} for r in rows],
         )
+    gcs_upload()
 
 
 def get_sp500_list() -> list[dict]:
@@ -162,7 +217,9 @@ def create_run(ticker: str, llm: str, prompt_version: str, model_name: str) -> i
             """,
             (ticker, llm, prompt_version, model_name, datetime.now().isoformat()),
         )
-        return cur.lastrowid
+        run_id = cur.lastrowid
+    gcs_upload()
+    return run_id
 
 
 def save_answer(
@@ -218,6 +275,7 @@ def finalize_run(
                 "run_id":    run_id,
             },
         )
+    gcs_upload()
 
 
 def mark_run_failed(run_id: int):
@@ -226,6 +284,7 @@ def mark_run_failed(run_id: int):
             "UPDATE scorecard_runs SET status = 'failed' WHERE run_id = ?",
             (run_id,),
         )
+    gcs_upload()
 
 
 def get_answers(run_id: int) -> list[dict]:
