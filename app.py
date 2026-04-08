@@ -4004,9 +4004,10 @@ elif page == "🎯  Scorecard":
     # ── Imports & init ─────────────────────────────────────────────────────────
     from scorecard_db import (
         init_db, get_sp500_list, sp500_count, upsert_sp500_companies, upsert_kpis,
-        get_all_runs, get_run, create_run, save_answer, finalize_run,
-        mark_run_failed, get_answers, compute_scores, CATEGORY_WEIGHTS,
-        gcs_download,
+        get_all_runs, get_run, create_run, get_or_create_partial_run,
+        get_answered_question_ids, get_answered_categories, set_run_partial,
+        save_answer, finalize_run, mark_run_failed, get_answers, compute_scores,
+        CATEGORY_WEIGHTS, gcs_download,
     )
 
     # Download DB from GCS once per session (no-op if GCS not configured)
@@ -4091,6 +4092,30 @@ elif page == "🎯  Scorecard":
             messages=[{"role": "user", "content": prompt}],
         )
         return msg.content[0].text
+
+    def _call_with_retry(fn, max_retries: int = 4, base_delay: int = 15,
+                         status_placeholder=None) -> str:
+        """Call fn() with exponential backoff on rate-limit (429) errors."""
+        for attempt in range(max_retries):
+            try:
+                return fn()
+            except Exception as e:
+                err = str(e).lower()
+                is_rate = any(x in err for x in ["429", "rate", "quota", "too many", "resource_exhausted"])
+                if is_rate and attempt < max_retries - 1:
+                    wait = base_delay * (2 ** attempt)   # 15, 30, 60, 120 s
+                    for remaining in range(wait, 0, -1):
+                        if status_placeholder:
+                            status_placeholder.warning(
+                                f"⚠️ Rate limit — esperando {remaining}s antes de reintentar "
+                                f"(intento {attempt+1}/{max_retries})…"
+                            )
+                        _time.sleep(1)
+                    if status_placeholder:
+                        status_placeholder.empty()
+                else:
+                    raise
+        raise RuntimeError("Max reintentos alcanzado")
 
     # ── S&P 500 list load / refresh ────────────────────────────────────────────
     _SP500_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sp500_list.csv")
@@ -4297,6 +4322,76 @@ elif page == "🎯  Scorecard":
         sc_model_default = "gemini-2.5-pro" if sc_llm == "Gemini" else "claude-opus-4-5"
         sc_model = st.text_input("Modelo", value=sc_model_default, key="sc_model")
 
+    # ── Run mode & category selector ──────────────────────────────────────────
+    ALL_SCORED_CATS = list(CATEGORY_WEIGHTS.keys())   # 6 scored categories
+    llm_key_preview = sc_llm.lower()
+
+    # Check if there's already a partial run for this combo
+    _existing_partial = None
+    _done_cats: set[str] = set()
+    for _r in _all_runs:
+        if (_r["ticker"] == sc_selected_ticker
+                and _r["llm"] == llm_key_preview
+                and _r["prompt_version"] == sc_pver
+                and _r["status"] in ("partial", "running")):
+            _existing_partial = _r
+            _done_cats = get_answered_categories(_r["run_id"])
+            break
+
+    mode_col, delay_col = st.columns([2, 1])
+    with mode_col:
+        sc_run_mode = st.radio(
+            "Modo de ejecución",
+            ["Todas las categorías", "Por categoría"],
+            horizontal=True,
+            key="sc_run_mode",
+        )
+    with delay_col:
+        sc_delay = st.slider(
+            "Pausa entre preguntas (s)",
+            min_value=0, max_value=15, value=2,
+            key="sc_delay",
+            help="Aumenta si recibes errores 429 (Too Many Requests)",
+        )
+
+    # Show progress if partial run exists
+    if _existing_partial:
+        st.info(
+            f"📂 Ejecución parcial en curso (run #{_existing_partial['run_id']}) — "
+            f"categorías completadas: {', '.join(_done_cats) if _done_cats else 'ninguna'}"
+        )
+        _status_rows = []
+        for cat in ["Circulo de Competencia"] + ALL_SCORED_CATS:
+            _status_rows.append({
+                "Categoría": cat,
+                "Estado": "✅ Completada" if cat in _done_cats else "⏳ Pendiente",
+            })
+        st.dataframe(pd.DataFrame(_status_rows), hide_index=True, use_container_width=True)
+
+        if st.button("🗑️ Descartar ejecución parcial y empezar de cero",
+                     key="sc_discard_partial"):
+            create_run(sc_selected_ticker, llm_key_preview, sc_pver, sc_model)
+            st.rerun()
+
+    # Category multi-select (only shown in category mode)
+    sc_selected_cats = ALL_SCORED_CATS  # default: all
+    if sc_run_mode == "Por categoría":
+        pending_cats = [c for c in ALL_SCORED_CATS if c not in _done_cats]
+        sc_selected_cats = st.multiselect(
+            "Categorías a ejecutar",
+            options=ALL_SCORED_CATS,
+            default=pending_cats,
+            key="sc_cat_select",
+        )
+        _circulo_done = "Circulo de Competencia" in _done_cats
+        sc_run_circulo = st.checkbox(
+            "Incluir Círculo de Competencia (contexto)",
+            value=not _circulo_done,
+            key="sc_run_circulo",
+        )
+    else:
+        sc_run_circulo = True
+
     sc_run_btn = st.button(
         f"▶ Ejecutar — {sc_llm} {sc_pver.upper()} para {sc_selected_ticker}",
         type="primary",
@@ -4308,74 +4403,141 @@ elif page == "🎯  Scorecard":
     if sc_run_btn:
         if not sc_api_key:
             st.error("Ingresa una API Key para continuar.")
+        elif sc_run_mode == "Por categoría" and not sc_selected_cats and not sc_run_circulo:
+            st.error("Selecciona al menos una categoría.")
         else:
             llm_key = sc_llm.lower()
-            run_id  = create_run(sc_selected_ticker, llm_key, sc_pver, sc_model)
+
+            # Get or create a partial run (reuse existing if resuming)
+            if sc_run_mode == "Por categoría":
+                run_id, _ = get_or_create_partial_run(
+                    sc_selected_ticker, llm_key, sc_pver, sc_model
+                )
+            else:
+                run_id = create_run(sc_selected_ticker, llm_key, sc_pver, sc_model)
+
+            already_answered = get_answered_question_ids(run_id)
             st.session_state["sc_last_run_id"] = run_id
 
-            total_qs = len(SC_SCORED_QS) + len(SC_CIRCULO_QS)
-            progress_bar = st.progress(0, text="Iniciando…")
-            status_box   = st.empty()
-            errors = []
+            # Filter questions to execute
+            circulo_to_run = (
+                [q for q in SC_CIRCULO_QS if q["id"] not in already_answered]
+                if sc_run_circulo else []
+            )
+            scored_to_run = [
+                q for q in SC_SCORED_QS
+                if q["id"] not in already_answered
+                and (sc_run_mode == "Todas las categorías" or q["categoria"] in sc_selected_cats)
+            ]
+            total_to_run = len(circulo_to_run) + len(scored_to_run)
 
-            try:
-                # Circulo de Competencia (no score, just context)
-                for i, q in enumerate(SC_CIRCULO_QS):
-                    status_box.caption(f"🔍 Contexto: {q['pregunta'][:70]}…")
-                    prompt = _build_prompt(q, sc_selected_ticker, sc_pver)
-                    try:
-                        if llm_key == "gemini":
-                            ans = _call_gemini(sc_api_key, sc_model, prompt)
+            if total_to_run == 0:
+                st.info("Todas las preguntas seleccionadas ya tienen respuesta.")
+            else:
+                progress_bar = st.progress(0, text="Iniciando…")
+                status_box   = st.empty()
+                retry_box    = st.empty()
+                errors = []
+                done_count = 0
+
+                try:
+                    # Circulo de Competencia
+                    for q in circulo_to_run:
+                        status_box.caption(f"🔍 Contexto: {q['pregunta'][:70]}…")
+                        prompt = _build_prompt(q, sc_selected_ticker, sc_pver)
+                        try:
+                            if llm_key == "gemini":
+                                ans = _call_with_retry(
+                                    lambda p=prompt: _call_gemini(sc_api_key, sc_model, p),
+                                    status_placeholder=retry_box,
+                                )
+                            else:
+                                ans = _call_with_retry(
+                                    lambda p=prompt: _call_claude(sc_api_key, sc_model, p),
+                                    status_placeholder=retry_box,
+                                )
+                        except Exception as e:
+                            ans = f"[Error: {e}]"
+                            errors.append(str(e))
+                        save_answer(run_id, q["id"], q["categoria"], q["pregunta"],
+                                    None, ans, sc_pver)
+                        done_count += 1
+                        progress_bar.progress(done_count / total_to_run,
+                                              text=f"Contexto ({done_count}/{len(circulo_to_run)})")
+                        if sc_delay > 0:
+                            _time.sleep(sc_delay)
+
+                    # Scored questions
+                    for i, q in enumerate(scored_to_run):
+                        status_box.caption(
+                            f"📊 [{q['categoria']}] {q['pregunta'][:65]}…"
+                        )
+                        prompt = _build_prompt(q, sc_selected_ticker, sc_pver)
+                        try:
+                            if llm_key == "gemini":
+                                ans = _call_with_retry(
+                                    lambda p=prompt: _call_gemini(sc_api_key, sc_model, p),
+                                    status_placeholder=retry_box,
+                                )
+                            else:
+                                ans = _call_with_retry(
+                                    lambda p=prompt: _call_claude(sc_api_key, sc_model, p),
+                                    status_placeholder=retry_box,
+                                )
+                            score = _extract_score(ans)
+                        except Exception as e:
+                            ans   = f"[Error: {e}]"
+                            score = None
+                            errors.append(str(e))
+                        save_answer(run_id, q["id"], q["categoria"], q["pregunta"],
+                                    score, ans, sc_pver)
+                        done_count += 1
+                        progress_bar.progress(done_count / total_to_run,
+                                              text=f"[{q['categoria']}] {i+1}/{len(scored_to_run)} — score: {score}")
+                        if sc_delay > 0:
+                            _time.sleep(sc_delay)
+
+                    # Check if ALL 74 questions are now answered → finalize
+                    all_answered = get_answered_question_ids(run_id)
+                    all_q_ids   = {q["id"] for q in SC_QUESTIONS}
+                    progress_bar.empty()
+                    status_box.empty()
+                    retry_box.empty()
+
+                    if all_q_ids <= all_answered:
+                        answers = get_answers(run_id)
+                        cat_avgs, total = compute_scores(answers)
+                        finalize_run(run_id, cat_avgs, total)
+                        if errors:
+                            st.warning(
+                                f"Completado con {len(errors)} errores. "
+                                f"Score total: **{total:.2f}/10**"
+                            )
                         else:
-                            ans = _call_claude(sc_api_key, sc_model, prompt)
-                    except Exception as e:
-                        ans = f"[Error: {e}]"
-                        errors.append(str(e))
-                    save_answer(run_id, q["id"], q["categoria"], q["pregunta"],
-                                None, ans, sc_pver)
-                    progress_bar.progress((i + 1) / total_qs,
-                                          text=f"Contexto ({i+1}/{len(SC_CIRCULO_QS)})")
-
-                # Scored questions
-                done = len(SC_CIRCULO_QS)
-                for i, q in enumerate(SC_SCORED_QS):
-                    status_box.caption(
-                        f"📊 [{q['categoria']}] {q['pregunta'][:65]}…"
-                    )
-                    prompt = _build_prompt(q, sc_selected_ticker, sc_pver)
-                    try:
-                        if llm_key == "gemini":
-                            ans = _call_gemini(sc_api_key, sc_model, prompt)
+                            st.success(
+                                f"✅ Scorecard completado · Score total: **{total:.2f} / 10**"
+                            )
+                    else:
+                        set_run_partial(run_id)
+                        remaining = len(all_q_ids) - len(all_answered)
+                        if errors:
+                            st.warning(
+                                f"Categorías ejecutadas con {len(errors)} errores. "
+                                f"Faltan {remaining} preguntas para completar el scorecard."
+                            )
                         else:
-                            ans = _call_claude(sc_api_key, sc_model, prompt)
-                        score = _extract_score(ans)
-                    except Exception as e:
-                        ans   = f"[Error: {e}]"
-                        score = None
-                        errors.append(str(e))
-                    save_answer(run_id, q["id"], q["categoria"], q["pregunta"],
-                                score, ans, sc_pver)
-                    done += 1
-                    progress_bar.progress(done / total_qs,
-                                          text=f"Pregunta {i+1}/{len(SC_SCORED_QS)} — score: {score}")
+                            st.info(
+                                f"✅ Categorías guardadas. "
+                                f"Faltan {remaining} preguntas para completar el scorecard."
+                            )
+                    st.rerun()
 
-                # Finalize
-                answers = get_answers(run_id)
-                cat_avgs, total = compute_scores(answers)
-                finalize_run(run_id, cat_avgs, total)
-                progress_bar.empty()
-                status_box.empty()
-                if errors:
-                    st.warning(f"Completado con {len(errors)} errores. Score total: **{total:.2f}/10**")
-                else:
-                    st.success(f"✅ Scorecard completado · Score total: **{total:.2f} / 10**")
-                st.rerun()
-
-            except Exception as ex:
-                mark_run_failed(run_id)
-                progress_bar.empty()
-                status_box.empty()
-                st.error(f"Error fatal: {ex}")
+                except Exception as ex:
+                    set_run_partial(run_id)
+                    progress_bar.empty()
+                    status_box.empty()
+                    retry_box.empty()
+                    st.error(f"Error fatal: {ex}")
 
     # ══════════════════════════════════════════════════════════════════════════
     # SCORE RESULTS — show if any run exists for this ticker
@@ -4383,7 +4545,8 @@ elif page == "🎯  Scorecard":
     _ticker_runs = [r for r in _all_runs if r["ticker"] == sc_selected_ticker and r["status"] == "complete"]
 
     if not _ticker_runs:
-        st.info("Sin scorecards para esta empresa todavía. Configura el LLM y ejecuta el algoritmo.")
+        if not _existing_partial:
+            st.info("Sin scorecards para esta empresa todavía. Configura el LLM y ejecuta el algoritmo.")
         st.stop()
 
     # Tabs: one per completed run

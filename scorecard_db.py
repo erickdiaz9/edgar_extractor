@@ -222,6 +222,68 @@ def create_run(ticker: str, llm: str, prompt_version: str, model_name: str) -> i
     return run_id
 
 
+def get_or_create_partial_run(
+    ticker: str, llm: str, prompt_version: str, model_name: str
+) -> tuple[int, bool]:
+    """
+    Find an existing in-progress run for this combo, or create a new one.
+    Returns (run_id, is_new).  Used for category-by-category execution.
+    """
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT run_id FROM scorecard_runs
+            WHERE ticker=? AND llm=? AND prompt_version=?
+              AND status IN ('running', 'partial')
+            ORDER BY run_date DESC LIMIT 1
+            """,
+            (ticker, llm, prompt_version),
+        ).fetchone()
+        if row:
+            return row[0], False
+        cur = conn.execute(
+            """
+            INSERT INTO scorecard_runs
+                (ticker, llm, prompt_version, model_name, run_date, status)
+            VALUES (?, ?, ?, ?, ?, 'partial')
+            """,
+            (ticker, llm, prompt_version, model_name, datetime.now().isoformat()),
+        )
+        run_id = cur.lastrowid
+    gcs_upload()
+    return run_id, True
+
+
+def get_answered_question_ids(run_id: int) -> set[int]:
+    """Return set of question_ids already saved for this run."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT question_id FROM scorecard_answers WHERE run_id=?",
+            (run_id,),
+        ).fetchall()
+        return {r[0] for r in rows}
+
+
+def get_answered_categories(run_id: int) -> set[str]:
+    """Return set of categories that have at least one answer in this run."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT categoria FROM scorecard_answers WHERE run_id=?",
+            (run_id,),
+        ).fetchall()
+        return {r[0] for r in rows}
+
+
+def set_run_partial(run_id: int):
+    """Mark run as partial (paused between category executions)."""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE scorecard_runs SET status='partial' WHERE run_id=?",
+            (run_id,),
+        )
+    gcs_upload()
+
+
 def save_answer(
     run_id: int,
     question_id: int,
