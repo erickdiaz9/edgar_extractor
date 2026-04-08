@@ -4070,7 +4070,7 @@ elif page == "🎯  Scorecard":
         return f"{s:.{decimals}f}"
 
     def _call_gemini(api_key: str, model: str, prompt: str) -> str:
-        from google import genai as _genai
+        import google.genai as _genai
         client = _genai.Client(api_key=api_key)
         resp = client.models.generate_content(model=model, contents=prompt)
         return resp.text
