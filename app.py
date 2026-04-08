@@ -7,6 +7,7 @@ Deployed via Streamlit Cloud — no server or API key needed.
 """
 
 import io
+import os
 import zipfile
 
 import streamlit as st
@@ -1508,7 +1509,7 @@ with st.sidebar:
     # ── Top-level navigation (persists across reruns) ────────────────────────
     page = st.radio(
         "Page",
-        options=["📁  Filings", "📈  KPI Explorer", "💰  Model DCF", "📉  Drawdown", "📊  Returns"],
+        options=["📁  Filings", "📈  KPI Explorer", "💰  Model DCF", "📉  Drawdown", "📊  Returns", "🎯  Scorecard"],
         label_visibility="collapsed",
         horizontal=True,
         key="nav_page",
@@ -1622,6 +1623,24 @@ with st.sidebar:
         st.info(
             "Enter any ticker to compute buy-and-hold IRR vs S&P 500, "
             "with optional dividend reinvestment and bootstrap simulation."
+        )
+
+    # ── Scorecard sidebar ─────────────────────────────────────────────────────
+    elif page == "🎯  Scorecard":
+        st.markdown("**Base de datos local**")
+        try:
+            from scorecard_db import init_db, sp500_count, get_all_runs
+            init_db()
+            n_co  = sp500_count()
+            n_run = len(get_all_runs())
+            st.caption(f"🏢 {n_co} empresas cargadas")
+            st.caption(f"🎯 {n_run} scorecards guardados")
+        except Exception:
+            st.caption("Base de datos lista")
+        st.divider()
+        st.info(
+            "Selecciona una empresa del S&P 500, configura el LLM y "
+            "ejecuta el algoritmo de scoring con tus 72 preguntas."
         )
 
 
@@ -3971,3 +3990,487 @@ elif page == "📊  Returns":
         )
         st.plotly_chart(fig_bt, use_container_width=True, key=f"tr_bt_{yrs}")
         st.markdown("---")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  PAGE: SCORECARD
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "🎯  Scorecard":
+    import json as _json
+    import re as _re
+    import time as _time
+    import threading as _threading
+
+    # ── Imports & init ─────────────────────────────────────────────────────────
+    from scorecard_db import (
+        init_db, get_sp500_list, sp500_count, upsert_sp500_companies, upsert_kpis,
+        get_all_runs, get_run, create_run, save_answer, finalize_run,
+        mark_run_failed, get_answers, compute_scores, CATEGORY_WEIGHTS,
+    )
+    init_db()
+
+    # ── Questions data ─────────────────────────────────────────────────────────
+    _QUESTIONS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scorecard_questions.json")
+
+    @st.cache_data(ttl=None)
+    def _load_questions():
+        with open(_QUESTIONS_PATH, encoding="utf-8") as f:
+            return _json.load(f)
+
+    SC_QUESTIONS = _load_questions()
+    SC_SCORED_QS = [q for q in SC_QUESTIONS if q["categoria"] != "Circulo de Competencia"]
+    SC_CIRCULO_QS = [q for q in SC_QUESTIONS if q["categoria"] == "Circulo de Competencia"]
+
+    # ── Constants ─────────────────────────────────────────────────────────────
+    CAT_COLORS = {
+        "Fuerzas":              "#3b82f6",
+        "Industria":            "#8b5cf6",
+        "MOAT Company":         "#f59e0b",
+        "Management & Culture": "#10b981",
+        "Brand":                "#ec4899",
+        "Finance":              "#ef4444",
+    }
+    LLM_OPTIONS  = ["Gemini", "Claude"]
+    PVER_OPTIONS = ["v1", "v2"]
+    SCORE_SUFFIX = (
+        "\n\n---\n"
+        "INSTRUCCIÓN FINAL: Responde en español. "
+        "Al final de tu respuesta, en una línea separada, escribe ÚNICAMENTE:\n"
+        "CALIFICACION: [número entero entre 0 y 10]"
+    )
+
+    # ── Helpers ────────────────────────────────────────────────────────────────
+    def _extract_score(text: str):
+        """Parse CALIFICACION: N from LLM response. Returns int 0-10 or None."""
+        m = _re.search(r"CALIFICACION\s*:\s*(\d+)", text, _re.IGNORECASE)
+        if m:
+            v = int(m.group(1))
+            return max(0, min(10, v))
+        # Fallback: last integer 0-10 in the last 300 chars
+        nums = _re.findall(r"\b(\d+)\b", text[-300:])
+        for n in reversed(nums):
+            if 0 <= int(n) <= 10:
+                return int(n)
+        return None
+
+    def _build_prompt(q: dict, ticker: str, version: str) -> str:
+        raw = q[f"prompt_{version}"] if f"prompt_{version}" in q and q[f"prompt_{version}"] else q["pregunta"]
+        prompt = raw.replace("[EMPRESA]", ticker).replace("[empresa]", ticker)
+        return prompt + SCORE_SUFFIX
+
+    def _score_color(s):
+        if s is None: return "#94a3b8"
+        if s >= 8:    return "#16a34a"
+        if s >= 6:    return "#d97706"
+        if s >= 4:    return "#ea580c"
+        return "#dc2626"
+
+    def _fmt_score(s, decimals=1):
+        if s is None: return "—"
+        return f"{s:.{decimals}f}"
+
+    def _call_gemini(api_key: str, model: str, prompt: str) -> str:
+        from google import genai as _genai
+        client = _genai.Client(api_key=api_key)
+        resp = client.models.generate_content(model=model, contents=prompt)
+        return resp.text
+
+    def _call_claude(api_key: str, model: str, prompt: str) -> str:
+        import anthropic as _anthropic
+        client = _anthropic.Anthropic(api_key=api_key)
+        msg = client.messages.create(
+            model=model,
+            max_tokens=1024,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return msg.content[0].text
+
+    # ── S&P 500 list load / refresh ────────────────────────────────────────────
+    _SP500_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sp500_list.csv")
+
+    @st.cache_data(ttl=None, show_spinner=False)
+    def _load_sp500_csv() -> list[dict]:
+        df = pd.read_csv(_SP500_CSV, encoding="utf-8")
+        return df.to_dict("records")
+
+    def _ensure_sp500_loaded():
+        if sp500_count() == 0:
+            rows = _load_sp500_csv()
+            upsert_sp500_companies(rows)
+
+    _ensure_sp500_loaded()
+
+    # ── Collect all existing run scores into a lookup dict ─────────────────────
+    _all_runs = get_all_runs()
+    _run_lookup: dict[str, dict] = {}     # key = "TICKER|llm|v1"
+    for _r in _all_runs:
+        _k = f"{_r['ticker']}|{_r['llm'].lower()}|{_r['prompt_version'].lower()}"
+        _run_lookup[_k] = _r
+
+    def _run_score(ticker, llm, ver):
+        k = f"{ticker}|{llm.lower()}|{ver.lower()}"
+        r = _run_lookup.get(k)
+        if r and r["status"] == "complete":
+            return r["total_score"]
+        return None
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # MAIN LAYOUT: two-panel  (list left / detail right)
+    # ══════════════════════════════════════════════════════════════════════════
+    st.markdown("## 🎯 Scorecard — S&P 500")
+    st.caption(
+        "72 preguntas de Value Investing · 6 categorías ponderadas · "
+        "Gemini y Claude · Prompt V1 y V2"
+    )
+
+    # ── Top controls: search + KPI refresh ────────────────────────────────────
+    ctrl_c1, ctrl_c2, ctrl_c3 = st.columns([3, 1, 1])
+    with ctrl_c1:
+        sc_search = st.text_input(
+            "Buscar empresa",
+            placeholder="Ticker o nombre…",
+            label_visibility="collapsed",
+            key="sc_search",
+        ).strip().upper()
+    with ctrl_c2:
+        sc_sector = st.selectbox(
+            "Sector",
+            options=["Todos"] + sorted({r["sector"] for r in get_sp500_list() if r.get("sector")}),
+            key="sc_sector",
+            label_visibility="collapsed",
+        )
+    with ctrl_c3:
+        sc_refresh_kpi = st.button("🔄 Refresh KPIs", use_container_width=True, key="sc_refresh_kpi")
+
+    # ── KPI batch refresh ─────────────────────────────────────────────────────
+    if sc_refresh_kpi:
+        import yfinance as yf
+        all_tickers = [r["ticker"] for r in get_sp500_list()]
+        prog = st.progress(0, text="Descargando precios…")
+        batch_size = 50
+        kpi_rows = []
+        for i in range(0, len(all_tickers), batch_size):
+            batch = all_tickers[i: i + batch_size]
+            prog.progress((i + batch_size) / len(all_tickers), text=f"KPIs {i}–{i+batch_size} / {len(all_tickers)}…")
+            try:
+                raw = yf.Tickers(" ".join(batch))
+                for tk in batch:
+                    try:
+                        info = raw.tickers[tk].fast_info
+                        kpi_rows.append({
+                            "ticker":     tk,
+                            "last_price": getattr(info, "last_price",  None),
+                            "market_cap": getattr(info, "market_cap",  None),
+                            "pe_ratio":   getattr(info, "pe_ratio",    None),
+                        })
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        if kpi_rows:
+            upsert_kpis(kpi_rows)
+        prog.empty()
+        st.success(f"KPIs actualizados para {len(kpi_rows)} empresas.")
+        st.rerun()
+
+    # ── Build display dataframe ────────────────────────────────────────────────
+    sp500_rows = get_sp500_list()
+
+    # Filter
+    if sc_search:
+        sp500_rows = [r for r in sp500_rows
+                      if sc_search in r["ticker"].upper()
+                      or sc_search in (r.get("name") or "").upper()]
+    if sc_sector != "Todos":
+        sp500_rows = [r for r in sp500_rows if r.get("sector") == sc_sector]
+
+    def _fmt_mktcap(v):
+        if v is None: return "—"
+        v = float(v)
+        if v >= 1e12: return f"${v/1e12:.1f}T"
+        if v >= 1e9:  return f"${v/1e9:.1f}B"
+        return f"${v/1e6:.0f}M"
+
+    def _fmt_pe(v):
+        return "—" if v is None or float(v) <= 0 else f"{float(v):.1f}x"
+
+    def _score_badge(s):
+        if s is None: return "—"
+        c = _score_color(s)
+        return f"🟢 {s:.1f}" if s >= 7 else (f"🟡 {s:.1f}" if s >= 5 else f"🔴 {s:.1f}")
+
+    display_rows = []
+    for r in sp500_rows:
+        tk = r["ticker"]
+        display_rows.append({
+            "Ticker":     tk,
+            "Empresa":    r.get("name", ""),
+            "Sector":     r.get("sector", ""),
+            "Precio":     f"${r['last_price']:,.2f}" if r.get("last_price") else "—",
+            "Mkt Cap":    _fmt_mktcap(r.get("market_cap")),
+            "P/E":        _fmt_pe(r.get("pe_ratio")),
+            "Gemini V1":  _score_badge(_run_score(tk, "gemini", "v1")),
+            "Gemini V2":  _score_badge(_run_score(tk, "gemini", "v2")),
+            "Claude V1":  _score_badge(_run_score(tk, "claude", "v1")),
+            "Claude V2":  _score_badge(_run_score(tk, "claude", "v2")),
+        })
+
+    display_df = pd.DataFrame(display_rows)
+
+    st.caption(f"**{len(display_rows)}** empresas")
+
+    # Interactive table with row selection
+    sc_sel = st.dataframe(
+        display_df,
+        use_container_width=True,
+        hide_index=True,
+        height=380,
+        selection_mode="single-row",
+        on_select="rerun",
+        key="sc_table",
+    )
+
+    # Determine selected ticker
+    sc_selected_ticker = None
+    sel_rows = sc_sel.selection.get("rows", []) if sc_sel.selection else []
+    if sel_rows:
+        sc_selected_ticker = display_rows[sel_rows[0]]["Ticker"]
+        st.session_state["sc_active_ticker"] = sc_selected_ticker
+    else:
+        sc_selected_ticker = st.session_state.get("sc_active_ticker")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # DETAIL PANEL — shown when a ticker is selected
+    # ══════════════════════════════════════════════════════════════════════════
+    if not sc_selected_ticker:
+        st.info("Selecciona una empresa de la tabla para ver su scorecard o ejecutar el algoritmo.")
+        st.stop()
+
+    st.markdown("---")
+
+    # Company info row
+    _co_info = next((r for r in sp500_rows if r["ticker"] == sc_selected_ticker), None)
+    if _co_info is None:
+        # may be outside filtered view; reload
+        _co_info = next((r for r in get_sp500_list() if r["ticker"] == sc_selected_ticker), {})
+
+    det_c1, det_c2 = st.columns([2, 1])
+    with det_c1:
+        st.markdown(
+            f"### 🏢 {_co_info.get('name', sc_selected_ticker)} "
+            f"<span style='font-size:0.75em;color:#94a3b8'>({sc_selected_ticker})</span>",
+            unsafe_allow_html=True,
+        )
+        st.caption(f"{_co_info.get('sector','—')} · {_co_info.get('industry','—')}")
+    with det_c2:
+        px  = _co_info.get("last_price")
+        mc  = _co_info.get("market_cap")
+        pe  = _co_info.get("pe_ratio")
+        st.metric("Precio", f"${px:,.2f}" if px else "—")
+        kpi_c1, kpi_c2 = st.columns(2)
+        kpi_c1.metric("Mkt Cap", _fmt_mktcap(mc))
+        kpi_c2.metric("P/E", _fmt_pe(pe))
+
+    # ── Run configuration ──────────────────────────────────────────────────────
+    st.markdown("#### ▶ Ejecutar Scorecard")
+    run_c1, run_c2, run_c3, run_c4 = st.columns([1, 1, 2, 1])
+    with run_c1:
+        sc_llm  = st.selectbox("LLM", LLM_OPTIONS,  key="sc_llm")
+    with run_c2:
+        sc_pver = st.selectbox("Prompts", PVER_OPTIONS, key="sc_pver",
+                               format_func=lambda x: f"Versión {x.upper()}")
+    with run_c3:
+        sc_api_key = st.text_input(
+            f"API Key ({sc_llm})",
+            type="password",
+            placeholder=f"Ingresa tu {sc_llm} API Key…",
+            key="sc_api_key",
+        )
+    with run_c4:
+        sc_model_default = "gemini-2.5-pro" if sc_llm == "Gemini" else "claude-opus-4-5"
+        sc_model = st.text_input("Modelo", value=sc_model_default, key="sc_model")
+
+    sc_run_btn = st.button(
+        f"▶ Ejecutar — {sc_llm} {sc_pver.upper()} para {sc_selected_ticker}",
+        type="primary",
+        use_container_width=True,
+        key="sc_run_btn",
+    )
+
+    # ── Execute scorecard run ──────────────────────────────────────────────────
+    if sc_run_btn:
+        if not sc_api_key:
+            st.error("Ingresa una API Key para continuar.")
+        else:
+            llm_key = sc_llm.lower()
+            run_id  = create_run(sc_selected_ticker, llm_key, sc_pver, sc_model)
+            st.session_state["sc_last_run_id"] = run_id
+
+            total_qs = len(SC_SCORED_QS) + len(SC_CIRCULO_QS)
+            progress_bar = st.progress(0, text="Iniciando…")
+            status_box   = st.empty()
+            errors = []
+
+            try:
+                # Circulo de Competencia (no score, just context)
+                for i, q in enumerate(SC_CIRCULO_QS):
+                    status_box.caption(f"🔍 Contexto: {q['pregunta'][:70]}…")
+                    prompt = _build_prompt(q, sc_selected_ticker, sc_pver)
+                    try:
+                        if llm_key == "gemini":
+                            ans = _call_gemini(sc_api_key, sc_model, prompt)
+                        else:
+                            ans = _call_claude(sc_api_key, sc_model, prompt)
+                    except Exception as e:
+                        ans = f"[Error: {e}]"
+                        errors.append(str(e))
+                    save_answer(run_id, q["id"], q["categoria"], q["pregunta"],
+                                None, ans, sc_pver)
+                    progress_bar.progress((i + 1) / total_qs,
+                                          text=f"Contexto ({i+1}/{len(SC_CIRCULO_QS)})")
+
+                # Scored questions
+                done = len(SC_CIRCULO_QS)
+                for i, q in enumerate(SC_SCORED_QS):
+                    status_box.caption(
+                        f"📊 [{q['categoria']}] {q['pregunta'][:65]}…"
+                    )
+                    prompt = _build_prompt(q, sc_selected_ticker, sc_pver)
+                    try:
+                        if llm_key == "gemini":
+                            ans = _call_gemini(sc_api_key, sc_model, prompt)
+                        else:
+                            ans = _call_claude(sc_api_key, sc_model, prompt)
+                        score = _extract_score(ans)
+                    except Exception as e:
+                        ans   = f"[Error: {e}]"
+                        score = None
+                        errors.append(str(e))
+                    save_answer(run_id, q["id"], q["categoria"], q["pregunta"],
+                                score, ans, sc_pver)
+                    done += 1
+                    progress_bar.progress(done / total_qs,
+                                          text=f"Pregunta {i+1}/{len(SC_SCORED_QS)} — score: {score}")
+
+                # Finalize
+                answers = get_answers(run_id)
+                cat_avgs, total = compute_scores(answers)
+                finalize_run(run_id, cat_avgs, total)
+                progress_bar.empty()
+                status_box.empty()
+                if errors:
+                    st.warning(f"Completado con {len(errors)} errores. Score total: **{total:.2f}/10**")
+                else:
+                    st.success(f"✅ Scorecard completado · Score total: **{total:.2f} / 10**")
+                st.rerun()
+
+            except Exception as ex:
+                mark_run_failed(run_id)
+                progress_bar.empty()
+                status_box.empty()
+                st.error(f"Error fatal: {ex}")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # SCORE RESULTS — show if any run exists for this ticker
+    # ══════════════════════════════════════════════════════════════════════════
+    _ticker_runs = [r for r in _all_runs if r["ticker"] == sc_selected_ticker and r["status"] == "complete"]
+
+    if not _ticker_runs:
+        st.info("Sin scorecards para esta empresa todavía. Configura el LLM y ejecuta el algoritmo.")
+        st.stop()
+
+    # Tabs: one per completed run
+    _run_tabs = st.tabs([
+        f"{r['llm'].capitalize()} {r['prompt_version'].upper()}  ({r['run_date'][:10]})"
+        for r in _ticker_runs
+    ])
+
+    for _tab, _run in zip(_run_tabs, _ticker_runs):
+        with _tab:
+            _ts = _run["total_score"]
+            _tc = _score_color(_ts)
+
+            # ── Overall score banner ───────────────────────────────────────────
+            sc_ov_c1, sc_ov_c2 = st.columns([1, 2])
+            with sc_ov_c1:
+                st.markdown(
+                    f"<div style='text-align:center;padding:24px 0'>"
+                    f"<div style='font-size:0.8em;color:#64748b;text-transform:uppercase;letter-spacing:.08em'>Score Total</div>"
+                    f"<div style='font-size:3.5em;font-weight:900;color:{_tc}'>{_fmt_score(_ts)}</div>"
+                    f"<div style='font-size:0.75em;color:#94a3b8'>/ 10</div>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+            with sc_ov_c2:
+                # Category scores horizontal bar
+                cat_data = [
+                    ("Fuerzas",              _run.get("score_fuerzas"),   0.05),
+                    ("Industria",            _run.get("score_industria"),  0.05),
+                    ("MOAT Company",         _run.get("score_moat"),       0.35),
+                    ("Management & Culture", _run.get("score_mgmt"),       0.20),
+                    ("Brand",                _run.get("score_brand"),      0.05),
+                    ("Finance",              _run.get("score_finance"),    0.30),
+                ]
+                fig_cat = go.Figure()
+                for cat, score, weight in cat_data:
+                    if score is None: continue
+                    fig_cat.add_trace(go.Bar(
+                        x=[score],
+                        y=[f"{cat} ({weight:.0%})"],
+                        orientation="h",
+                        marker_color=CAT_COLORS.get(cat, "#94a3b8"),
+                        text=[f"{score:.1f}"],
+                        textposition="inside",
+                        showlegend=False,
+                        name=cat,
+                    ))
+                fig_cat.add_vline(x=5, line=dict(color="#e2e8f0", width=1, dash="dot"))
+                fig_cat.update_layout(
+                    xaxis=dict(range=[0, 10], title="Score (0–10)", gridcolor="#f1f5f9"),
+                    yaxis=dict(autorange="reversed"),
+                    plot_bgcolor="white", paper_bgcolor="white",
+                    margin=dict(t=10, b=10, l=10, r=10),
+                    height=220,
+                    font=dict(size=11),
+                )
+                st.plotly_chart(fig_cat, use_container_width=True, key=f"sc_cat_{_run['run_id']}")
+
+            # ── Detailed Q&A per category ──────────────────────────────────────
+            st.markdown("#### Respuestas por Categoría")
+            _answers = get_answers(_run["run_id"])
+            _by_cat: dict[str, list] = {}
+            for _a in _answers:
+                _by_cat.setdefault(_a["categoria"], []).append(_a)
+
+            for _cat, _ans_list in _by_cat.items():
+                _cat_score = _run.get({
+                    "Fuerzas":              "score_fuerzas",
+                    "Industria":            "score_industria",
+                    "MOAT Company":         "score_moat",
+                    "Management & Culture": "score_mgmt",
+                    "Brand":                "score_brand",
+                    "Finance":              "score_finance",
+                }.get(_cat, ""))
+                _cat_label = (
+                    f"{_cat}  ·  Score: {_fmt_score(_cat_score)}/10"
+                    if _cat_score is not None else _cat
+                )
+                with st.expander(_cat_label, expanded=False):
+                    for _a in _ans_list:
+                        _s = _a.get("score")
+                        _sc_str = f"**{_s}/10**" if _s is not None else "*Sin calificación*"
+                        _s_color = _score_color(_s)
+                        st.markdown(
+                            f"<div style='border-left:4px solid {_s_color};"
+                            f"padding:6px 12px;margin-bottom:10px;background:#f8fafc;"
+                            f"border-radius:0 6px 6px 0'>"
+                            f"<div style='font-weight:600;font-size:0.9em;color:#1e293b'>"
+                            f"{_a['pregunta']}</div>"
+                            f"<div style='font-size:0.78em;color:{_s_color};font-weight:700;margin-top:4px'>"
+                            f"Calificación: {_s}/10</div>"
+                            f"</div>",
+                            unsafe_allow_html=True,
+                        )
+                        with st.expander("Ver respuesta completa", expanded=False):
+                            st.markdown(_a.get("answer_text", ""), unsafe_allow_html=False)
+                        st.markdown("<hr style='margin:4px 0;border-color:#f1f5f9'>", unsafe_allow_html=True)
