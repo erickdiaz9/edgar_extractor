@@ -4095,19 +4095,42 @@ elif page == "🎯  Scorecard":
 
     def _call_with_retry(fn, max_retries: int = 4, base_delay: int = 15,
                          status_placeholder=None) -> str:
-        """Call fn() with exponential backoff on rate-limit (429) errors."""
+        """
+        Call fn() with exponential backoff on temporary rate-limit (429) errors.
+        Raises immediately on permanent quota exhaustion (daily/free-tier limits).
+        """
+        PERMANENT_SIGNALS = [
+            "per_day", "perday", "free_tier", "limit: 0",
+            "GenerateRequestsPerDay", "InputTokensPerModelPerDay",
+            "permodelperday", "daily",
+        ]
         for attempt in range(max_retries):
             try:
                 return fn()
             except Exception as e:
-                err = str(e).lower()
-                is_rate = any(x in err for x in ["429", "rate", "quota", "too many", "resource_exhausted"])
-                if is_rate and attempt < max_retries - 1:
+                err_str = str(e)
+                err_low = err_str.lower()
+                is_429  = any(x in err_low for x in ["429", "resource_exhausted", "too many"])
+
+                if not is_429:
+                    raise  # Non-rate-limit error — surface immediately
+
+                # Check if it's a permanent daily/free-tier quota (retrying won't help)
+                is_permanent = any(x.lower() in err_low for x in PERMANENT_SIGNALS)
+                if is_permanent:
+                    raise RuntimeError(
+                        "⛔ Cuota diaria agotada para este modelo. "
+                        "Espera 24h o cambia de modelo.\n\n"
+                        f"Detalle: {err_str[:300]}"
+                    )
+
+                # Temporary RPM rate limit — retry with backoff
+                if attempt < max_retries - 1:
                     wait = base_delay * (2 ** attempt)   # 15, 30, 60, 120 s
                     for remaining in range(wait, 0, -1):
                         if status_placeholder:
                             status_placeholder.warning(
-                                f"⚠️ Rate limit — esperando {remaining}s antes de reintentar "
+                                f"⚠️ Rate limit temporal — esperando {remaining}s "
                                 f"(intento {attempt+1}/{max_retries})…"
                             )
                         _time.sleep(1)
@@ -4115,7 +4138,7 @@ elif page == "🎯  Scorecard":
                         status_placeholder.empty()
                 else:
                     raise
-        raise RuntimeError("Max reintentos alcanzado")
+        raise RuntimeError("Máximo de reintentos alcanzado")
 
     # ── S&P 500 list load / refresh ────────────────────────────────────────────
     _SP500_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sp500_list.csv")
@@ -4319,7 +4342,7 @@ elif page == "🎯  Scorecard":
             key="sc_api_key",
         )
     with run_c4:
-        sc_model_default = "gemini-2.5-pro" if sc_llm == "Gemini" else "claude-opus-4-5"
+        sc_model_default = "gemini-2.5-flash" if sc_llm == "Gemini" else "claude-opus-4-5"
         sc_model = st.text_input("Modelo", value=sc_model_default, key="sc_model")
 
     # ── Run mode & category selector ──────────────────────────────────────────
