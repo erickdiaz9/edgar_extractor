@@ -4563,23 +4563,44 @@ elif page == "🎯  Scorecard":
                     st.error(f"Error fatal: {ex}")
 
     # ══════════════════════════════════════════════════════════════════════════
-    # SCORE RESULTS — show if any run exists for this ticker
+    # SCORE RESULTS — show complete runs + any partial runs with answers
     # ══════════════════════════════════════════════════════════════════════════
-    _ticker_runs = [r for r in _all_runs if r["ticker"] == sc_selected_ticker and r["status"] == "complete"]
+    st.divider()
+    _ticker_runs = [
+        r for r in _all_runs
+        if r["ticker"] == sc_selected_ticker
+        and r["status"] in ("complete", "partial", "running")
+    ]
 
     if not _ticker_runs:
-        if not _existing_partial:
-            st.info("Sin scorecards para esta empresa todavía. Configura el LLM y ejecuta el algoritmo.")
+        st.info("Sin scorecards para esta empresa todavía. Configura el LLM y ejecuta el algoritmo.")
         st.stop()
 
-    # Tabs: one per completed run
-    _run_tabs = st.tabs([
-        f"{r['llm'].capitalize()} {r['prompt_version'].upper()}  ({r['run_date'][:10]})"
-        for r in _ticker_runs
-    ])
+    # Tabs: one per run (complete or partial)
+    def _run_tab_label(r):
+        status_icon = "✅" if r["status"] == "complete" else "⏳"
+        return f"{status_icon} {r['llm'].capitalize()} {r['prompt_version'].upper()} ({r['run_date'][:10]})"
+
+    _run_tabs = st.tabs([_run_tab_label(r) for r in _ticker_runs])
 
     for _tab, _run in zip(_run_tabs, _ticker_runs):
         with _tab:
+            # For partial runs, compute scores live from saved answers
+            if _run["status"] != "complete":
+                st.warning("⏳ Ejecución parcial — resultados incompletos. Ejecuta las categorías faltantes para finalizar.")
+                _partial_answers = get_answers(_run["run_id"])
+                _partial_cat_avgs, _partial_total = compute_scores(_partial_answers)
+                _ts = _partial_total if _partial_answers else None
+                # Inject computed values into run dict for display
+                _run = {**_run,
+                        "total_score":     _partial_total,
+                        "score_fuerzas":   _partial_cat_avgs.get("Fuerzas"),
+                        "score_industria": _partial_cat_avgs.get("Industria"),
+                        "score_moat":      _partial_cat_avgs.get("MOAT Company"),
+                        "score_mgmt":      _partial_cat_avgs.get("Management & Culture"),
+                        "score_brand":     _partial_cat_avgs.get("Brand"),
+                        "score_finance":   _partial_cat_avgs.get("Finance"),
+                        }
             _ts = _run["total_score"]
             _tc = _score_color(_ts)
 
