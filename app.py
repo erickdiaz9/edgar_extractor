@@ -4342,8 +4342,15 @@ elif page == "🎯  Scorecard":
             key="sc_api_key",
         )
     with run_c4:
-        sc_model_default = "gemini-2.5-flash" if sc_llm == "Gemini" else "claude-opus-4-5"
-        sc_model = st.text_input("Modelo", value=sc_model_default, key="sc_model")
+        if sc_llm == "Gemini":
+            _GEMINI_MODELS = {
+                "⚡ Rápido (~XX MXN) — gemini-3-flash":       "gemini-3-flash",
+                "🧠 Pensar (~35 MXN) — gemini-3.1-pro-preview": "gemini-3.1-pro-preview",
+            }
+            _model_label = st.selectbox("Modelo", list(_GEMINI_MODELS.keys()), key="sc_model_label")
+            sc_model = _GEMINI_MODELS[_model_label]
+        else:
+            sc_model = st.text_input("Modelo", value="claude-opus-4-5", key="sc_model")
 
     # ── Run mode & category selector ──────────────────────────────────────────
     ALL_SCORED_CATS = list(CATEGORY_WEIGHTS.keys())   # 6 scored categories
