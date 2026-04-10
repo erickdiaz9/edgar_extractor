@@ -4649,9 +4649,78 @@ elif page == "🎯  Scorecard":
                 )
                 st.plotly_chart(fig_cat, use_container_width=True, key=f"sc_cat_{_run['run_id']}")
 
+            # ── Export ────────────────────────────────────────────────────────
+            _answers = get_answers(_run["run_id"])
+
+            def _build_export_df(answers, run, questions_lookup):
+                import io
+                rows = []
+                for a in answers:
+                    q_data = questions_lookup.get(a["question_id"])
+                    pver   = a.get("prompt_used", run["prompt_version"])
+                    full_prompt = (
+                        _build_prompt(q_data, run["ticker"], pver)
+                        if q_data else ""
+                    )
+                    rows.append({
+                        "Categoria":    a["categoria"],
+                        "Pregunta":     a["pregunta"],
+                        "Score":        a["score"],
+                        "Prompt_Usado": pver.upper(),
+                        "Prompt_Completo": full_prompt,
+                        "Respuesta":    a.get("answer_text", ""),
+                    })
+                return pd.DataFrame(rows)
+
+            _q_lookup = {q["id"]: q for q in SC_QUESTIONS}
+            _exp_df   = _build_export_df(_answers, _run, _q_lookup)
+
+            exp_c1, exp_c2 = st.columns(2)
+            with exp_c1:
+                # CSV download
+                _csv_bytes = _exp_df.to_csv(index=False).encode("utf-8-sig")
+                st.download_button(
+                    label="⬇️ Descargar CSV",
+                    data=_csv_bytes,
+                    file_name=f"scorecard_{_run['ticker']}_{_run['llm']}_{_run['prompt_version']}_{_run['run_date'][:10]}.csv",
+                    mime="text/csv",
+                    key=f"dl_csv_{_run['run_id']}",
+                    use_container_width=True,
+                )
+            with exp_c2:
+                # Excel download
+                import io as _io
+                _xl_buf = _io.BytesIO()
+                with pd.ExcelWriter(_xl_buf, engine="openpyxl") as _xw:
+                    # Summary sheet
+                    _summary = pd.DataFrame([{
+                        "Empresa":         _run["ticker"],
+                        "LLM":             _run["llm"].capitalize(),
+                        "Prompt Version":  _run["prompt_version"].upper(),
+                        "Modelo":          _run.get("model_name", ""),
+                        "Fecha":           _run["run_date"][:10],
+                        "Score Total":     _run.get("total_score"),
+                        "Score Fuerzas":   _run.get("score_fuerzas"),
+                        "Score Industria": _run.get("score_industria"),
+                        "Score MOAT":      _run.get("score_moat"),
+                        "Score Mgmt":      _run.get("score_mgmt"),
+                        "Score Brand":     _run.get("score_brand"),
+                        "Score Finance":   _run.get("score_finance"),
+                    }])
+                    _summary.to_excel(_xw, sheet_name="Resumen", index=False)
+                    _exp_df.to_excel(_xw, sheet_name="Prompts y Respuestas", index=False)
+                _xl_buf.seek(0)
+                st.download_button(
+                    label="⬇️ Descargar Excel",
+                    data=_xl_buf.read(),
+                    file_name=f"scorecard_{_run['ticker']}_{_run['llm']}_{_run['prompt_version']}_{_run['run_date'][:10]}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"dl_xlsx_{_run['run_id']}",
+                    use_container_width=True,
+                )
+
             # ── Detailed Q&A per category ──────────────────────────────────────
             st.markdown("#### Respuestas por Categoría")
-            _answers = get_answers(_run["run_id"])
             _by_cat: dict[str, list] = {}
             for _a in _answers:
                 _by_cat.setdefault(_a["categoria"], []).append(_a)
