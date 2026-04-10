@@ -4390,15 +4390,23 @@ elif page == "🎯  Scorecard":
             finalize_run(_partial_run_id, _p_cat_avgs, _p_total)
             st.rerun()
         else:
-            st.info(
-                f"📂 Ejecución parcial — faltan {_missing_count} preguntas. "
-                f"Categorías completadas: {', '.join(_done_cats) if _done_cats else 'ninguna'}"
-            )
+            st.info(f"📂 Ejecución parcial — faltan {_missing_count} preguntas para finalizar.")
+            # Per-category breakdown: answered vs total
             _status_rows = []
             for cat in ["Circulo de Competencia"] + ALL_SCORED_CATS:
+                _cat_total    = sum(1 for q in SC_QUESTIONS if q["categoria"] == cat)
+                _cat_answered = sum(1 for q in SC_QUESTIONS
+                                    if q["categoria"] == cat and q["id"] in _already_answered)
+                if _cat_answered == _cat_total:
+                    _estado = "✅ Completa"
+                elif _cat_answered == 0:
+                    _estado = "⏳ Pendiente"
+                else:
+                    _estado = f"⚠️ Parcial ({_cat_answered}/{_cat_total})"
                 _status_rows.append({
-                    "Categoría": cat,
-                    "Estado": "✅ Completada" if cat in _done_cats else "⏳ Pendiente",
+                    "Categoría":  cat,
+                    "Respondidas": f"{_cat_answered} / {_cat_total}",
+                    "Estado":     _estado,
                 })
             st.dataframe(pd.DataFrame(_status_rows), hide_index=True, use_container_width=True)
 
