@@ -4393,8 +4393,20 @@ elif page == "🎯  Scorecard":
 
         if st.button("🗑️ Descartar ejecución parcial y empezar de cero",
                      key="sc_discard_partial"):
-            create_run(sc_selected_ticker, llm_key_preview, sc_pver, sc_model)
-            st.rerun()
+            st.session_state["sc_confirm_discard"] = True
+
+        if st.session_state.get("sc_confirm_discard"):
+            st.warning("¿Estás seguro? Se eliminarán todas las respuestas guardadas para esta combinación.")
+            _conf_c1, _conf_c2 = st.columns(2)
+            with _conf_c1:
+                if st.button("✅ Sí, empezar de cero", key="sc_confirm_yes", type="primary", use_container_width=True):
+                    create_run(sc_selected_ticker, llm_key_preview, sc_pver, sc_model)
+                    st.session_state.pop("sc_confirm_discard", None)
+                    st.rerun()
+            with _conf_c2:
+                if st.button("❌ Cancelar", key="sc_confirm_no", use_container_width=True):
+                    st.session_state.pop("sc_confirm_discard", None)
+                    st.rerun()
 
     # Category multi-select (only shown in category mode)
     sc_selected_cats = ALL_SCORED_CATS  # default: all
