@@ -4685,6 +4685,19 @@ elif page == "🎯  Scorecard":
                             f"</div>",
                             unsafe_allow_html=True,
                         )
-                        with st.expander("Ver respuesta completa", expanded=False):
-                            st.markdown(_a.get("answer_text", ""), unsafe_allow_html=False)
+                        _q_data = next(
+                            (q for q in SC_QUESTIONS if q["id"] == _a["question_id"]), None
+                        )
+                        _prompt_ver = _a.get("prompt_used", _run["prompt_version"])
+                        _full_prompt = (
+                            _build_prompt(_q_data, _run["ticker"], _prompt_ver)
+                            if _q_data else "(prompt no disponible)"
+                        )
+                        qa_col1, qa_col2 = st.columns(2)
+                        with qa_col1:
+                            with st.expander("Ver prompt enviado al modelo", expanded=False):
+                                st.code(_full_prompt, language=None, wrap_lines=True)
+                        with qa_col2:
+                            with st.expander("Ver respuesta completa", expanded=False):
+                                st.markdown(_a.get("answer_text", ""), unsafe_allow_html=False)
                         st.markdown("<hr style='margin:4px 0;border-color:#f1f5f9'>", unsafe_allow_html=True)
