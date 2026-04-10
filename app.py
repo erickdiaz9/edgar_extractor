@@ -4377,19 +4377,30 @@ elif page == "🎯  Scorecard":
             help="Aumenta si recibes errores 429 (Too Many Requests)",
         )
 
-    # Show progress if partial run exists
+    # Show progress if partial run exists — auto-finalize if all answered
     if _existing_partial:
-        st.info(
-            f"📂 Ejecución parcial en curso (run #{_existing_partial['run_id']}) — "
-            f"categorías completadas: {', '.join(_done_cats) if _done_cats else 'ninguna'}"
-        )
-        _status_rows = []
-        for cat in ["Circulo de Competencia"] + ALL_SCORED_CATS:
-            _status_rows.append({
-                "Categoría": cat,
-                "Estado": "✅ Completada" if cat in _done_cats else "⏳ Pendiente",
-            })
-        st.dataframe(pd.DataFrame(_status_rows), hide_index=True, use_container_width=True)
+        _partial_run_id   = _existing_partial["run_id"]
+        _all_q_ids        = {q["id"] for q in SC_QUESTIONS}
+        _already_answered = get_answered_question_ids(_partial_run_id)
+        _missing_count    = len(_all_q_ids - _already_answered)
+
+        if _missing_count == 0:
+            _p_answers = get_answers(_partial_run_id)
+            _p_cat_avgs, _p_total = compute_scores(_p_answers)
+            finalize_run(_partial_run_id, _p_cat_avgs, _p_total)
+            st.rerun()
+        else:
+            st.info(
+                f"📂 Ejecución parcial — faltan {_missing_count} preguntas. "
+                f"Categorías completadas: {', '.join(_done_cats) if _done_cats else 'ninguna'}"
+            )
+            _status_rows = []
+            for cat in ["Circulo de Competencia"] + ALL_SCORED_CATS:
+                _status_rows.append({
+                    "Categoría": cat,
+                    "Estado": "✅ Completada" if cat in _done_cats else "⏳ Pendiente",
+                })
+            st.dataframe(pd.DataFrame(_status_rows), hide_index=True, use_container_width=True)
 
         if st.button("🗑️ Descartar ejecución parcial y empezar de cero",
                      key="sc_discard_partial"):
