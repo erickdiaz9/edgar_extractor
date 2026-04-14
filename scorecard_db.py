@@ -302,6 +302,7 @@ def save_answer(
             """,
             (run_id, question_id, categoria, pregunta, score, answer_text, prompt_used),
         )
+    gcs_upload()  # Upload after every answer — protects against server restart mid-run
 
 
 def finalize_run(
