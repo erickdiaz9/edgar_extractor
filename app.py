@@ -4369,7 +4369,22 @@ elif page == "🎯  Scorecard":
     ALL_SCORED_CATS = list(CATEGORY_WEIGHTS.keys())   # 6 scored categories
     llm_key_preview = sc_llm.lower()
 
-    # Check if there's already a partial run for this combo
+    # Auto-finalize ANY partial/running run for this ticker (not just current UI combo)
+    _all_q_ids_global = {q["id"] for q in SC_QUESTIONS}
+    _did_finalize_any = False
+    for _r in _all_runs:
+        if (_r["ticker"] == sc_selected_ticker
+                and _r["status"] in ("partial", "running")):
+            _answered = get_answered_question_ids(_r["run_id"])
+            if _all_q_ids_global <= _answered:
+                _p_answers = get_answers(_r["run_id"])
+                _p_cat_avgs, _p_total = compute_scores(_p_answers)
+                finalize_run(_r["run_id"], _p_cat_avgs, _p_total)
+                _did_finalize_any = True
+    if _did_finalize_any:
+        st.rerun()
+
+    # Check if there's already a partial run for the currently selected combo
     _existing_partial = None
     _done_cats: set[str] = set()
     for _r in _all_runs:
@@ -4397,19 +4412,13 @@ elif page == "🎯  Scorecard":
             help="Aumenta si recibes errores 429 (Too Many Requests)",
         )
 
-    # Show progress if partial run exists — auto-finalize if all answered
+    # Show progress if partial run exists for current combo
     if _existing_partial:
         _partial_run_id   = _existing_partial["run_id"]
-        _all_q_ids        = {q["id"] for q in SC_QUESTIONS}
         _already_answered = get_answered_question_ids(_partial_run_id)
-        _missing_count    = len(_all_q_ids - _already_answered)
+        _missing_count    = len(_all_q_ids_global - _already_answered)
 
-        if _missing_count == 0:
-            _p_answers = get_answers(_partial_run_id)
-            _p_cat_avgs, _p_total = compute_scores(_p_answers)
-            finalize_run(_partial_run_id, _p_cat_avgs, _p_total)
-            st.rerun()
-        else:
+        if _missing_count > 0:
             st.info(f"📂 Ejecución parcial — faltan {_missing_count} preguntas para finalizar.")
             # Per-category breakdown: answered vs total
             _status_rows = []
