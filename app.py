@@ -4626,6 +4626,27 @@ elif page == "🎯  Scorecard":
     # SCORE RESULTS — show complete runs + any partial runs with answers
     # ══════════════════════════════════════════════════════════════════════════
     st.divider()
+
+    # ── DB inspector ──────────────────────────────────────────────────────────
+    with st.expander("🗄️ Ver estado en base de datos", expanded=False):
+        _all_ticker_runs = [r for r in _all_runs if r["ticker"] == sc_selected_ticker]
+        if not _all_ticker_runs:
+            st.info("No hay ningún run en la base de datos para esta empresa.")
+        else:
+            _db_rows = []
+            for _r in _all_ticker_runs:
+                _ans_count = len(get_answered_question_ids(_r["run_id"]))
+                _db_rows.append({
+                    "Run ID":      _r["run_id"],
+                    "LLM":         _r["llm"].capitalize(),
+                    "Versión":     _r["prompt_version"].upper(),
+                    "Modelo":      _r.get("model_name", "—"),
+                    "Estado":      _r["status"],
+                    "Preguntas":   f"{_ans_count}/74",
+                    "Score Total": f"{_r['total_score']:.2f}" if _r.get("total_score") else "—",
+                    "Fecha":       _r["run_date"][:16] if _r.get("run_date") else "—",
+                })
+            st.dataframe(pd.DataFrame(_db_rows), hide_index=True, use_container_width=True)
     _ticker_runs = [
         r for r in _all_runs
         if r["ticker"] == sc_selected_ticker
