@@ -4353,7 +4353,7 @@ elif page == "🎯  Scorecard":
     with run_c4:
         if sc_llm == "Gemini":
             _GEMINI_MODELS = {
-                "⚡ Rápido (~XX MXN) — gemini-3-flash-preview": "gemini-3-flash-preview",
+                "⚡ Rápido (~7 MXN) — gemini-3-flash-preview": "gemini-3-flash-preview",
                 "🧠 Pensar (~35 MXN) — gemini-3.1-pro-preview": "gemini-3.1-pro-preview",
             }
             _model_label = st.selectbox("Modelo", list(_GEMINI_MODELS.keys()), key="sc_model_label")
