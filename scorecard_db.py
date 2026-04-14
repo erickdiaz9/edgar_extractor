@@ -73,6 +73,12 @@ def gcs_upload():
     client, bucket = _gcs_client()
     if bucket is None:
         return
+    # Ensure all pending writes are flushed to the main DB file before uploading
+    try:
+        with get_conn() as conn:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except Exception:
+        pass
     for attempt in range(3):
         try:
             blob = bucket.blob(GCS_BLOB_NAME)
@@ -135,7 +141,6 @@ def get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")
     return conn
 
 
