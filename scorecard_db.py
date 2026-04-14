@@ -281,10 +281,11 @@ def get_or_create_partial_run(
 
 
 def get_answered_question_ids(run_id: int) -> set[int]:
-    """Return set of question_ids already saved for this run."""
+    """Return set of question_ids with valid (non-error) answers for this run."""
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT question_id FROM scorecard_answers WHERE run_id=?",
+            """SELECT question_id FROM scorecard_answers
+               WHERE run_id=? AND (answer_text NOT LIKE '[Error:%' OR answer_text IS NULL)""",
             (run_id,),
         ).fetchall()
         return {r[0] for r in rows}
