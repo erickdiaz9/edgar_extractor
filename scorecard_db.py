@@ -7,16 +7,22 @@ downloaded from GCS on startup and re-uploaded after every write operation.
 """
 import sqlite3
 import os
+import time
 from datetime import datetime
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "scorecard.db")
 GCS_BLOB_NAME = "scorecard.db"
+
+# Module-level GCS status — read by the sidebar to show connection health
+gcs_last_error: str = ""
+gcs_ok: bool = True
 
 
 # ── GCS helpers ───────────────────────────────────────────────────────────────
 
 def _gcs_client():
     """Return (client, bucket) or (None, None) if GCS is not configured."""
+    global gcs_ok, gcs_last_error
     try:
         import streamlit as st
         from google.cloud import storage
@@ -33,33 +39,53 @@ def _gcs_client():
         creds = service_account.Credentials.from_service_account_info(creds_dict)
         client = storage.Client(credentials=creds, project=creds_dict.get("project_id"))
         return client, client.bucket(bucket_name)
-    except Exception:
+    except Exception as e:
+        gcs_ok = False
+        gcs_last_error = f"Config error: {e}"
         return None, None
 
 
 def gcs_download():
     """Download scorecard.db from GCS if it exists. Call once at app startup."""
+    global gcs_ok, gcs_last_error
     client, bucket = _gcs_client()
     if bucket is None:
         return
-    try:
-        blob = bucket.blob(GCS_BLOB_NAME)
-        if blob.exists():
-            blob.download_to_filename(DB_PATH)
-    except Exception:
-        pass  # Fall back to local/empty DB
+    for attempt in range(3):
+        try:
+            blob = bucket.blob(GCS_BLOB_NAME)
+            if blob.exists():
+                blob.download_to_filename(DB_PATH)
+            gcs_ok = True
+            gcs_last_error = ""
+            return
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+            else:
+                gcs_ok = False
+                gcs_last_error = f"Download failed: {e}"
 
 
 def gcs_upload():
-    """Upload current scorecard.db to GCS. Called after every write."""
+    """Upload current scorecard.db to GCS with retry. Called after every write."""
+    global gcs_ok, gcs_last_error
     client, bucket = _gcs_client()
     if bucket is None:
         return
-    try:
-        blob = bucket.blob(GCS_BLOB_NAME)
-        blob.upload_from_filename(DB_PATH)
-    except Exception:
-        pass
+    for attempt in range(3):
+        try:
+            blob = bucket.blob(GCS_BLOB_NAME)
+            blob.upload_from_filename(DB_PATH)
+            gcs_ok = True
+            gcs_last_error = ""
+            return
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+            else:
+                gcs_ok = False
+                gcs_last_error = f"Upload failed: {e}"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sp500_cache (

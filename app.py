@@ -1637,11 +1637,15 @@ with st.sidebar:
             st.caption(f"🎯 {n_run} scorecards completos")
             # GCS status
             try:
+                from scorecard_db import gcs_ok, gcs_last_error, _gcs_client
                 _c, _b = _gcs_client()
-                if _b is not None:
-                    st.caption("☁️ GCS conectado ✅")
-                else:
+                if _b is None:
                     st.caption("☁️ GCS no configurado")
+                elif gcs_ok:
+                    st.caption("☁️ GCS ✅ sincronizado")
+                else:
+                    st.caption(f"☁️ GCS ⚠️ error de sync")
+                    st.warning(f"GCS sync falló: {gcs_last_error}", icon="⚠️")
             except Exception:
                 st.caption("☁️ GCS error ⚠️")
         except Exception:
