@@ -4113,9 +4113,12 @@ elif page == "🎯  Scorecard":
         Raises immediately on permanent quota exhaustion (daily/free-tier limits).
         """
         PERMANENT_SIGNALS = [
+            # Gemini
             "per_day", "perday", "free_tier", "limit: 0",
             "GenerateRequestsPerDay", "InputTokensPerModelPerDay",
             "permodelperday", "daily",
+            # Claude / Anthropic
+            "credit balance", "spend limit", "billing", "insufficient_quota",
         ]
         for attempt in range(max_retries):
             try:
@@ -4123,7 +4126,7 @@ elif page == "🎯  Scorecard":
             except Exception as e:
                 err_str = str(e)
                 err_low = err_str.lower()
-                is_429  = any(x in err_low for x in ["429", "resource_exhausted", "too many"])
+                is_429  = any(x in err_low for x in ["429", "529", "resource_exhausted", "too many", "overloaded", "rate_limit"])
 
                 if not is_429:
                     raise  # Non-rate-limit error — surface immediately
