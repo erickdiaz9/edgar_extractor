@@ -1627,14 +1627,23 @@ with st.sidebar:
 
     # ── Scorecard sidebar ─────────────────────────────────────────────────────
     elif page == "🎯  Scorecard":
-        st.markdown("**Base de datos local**")
+        st.markdown("**Base de datos**")
         try:
-            from scorecard_db import init_db, sp500_count, get_all_runs
+            from scorecard_db import init_db, sp500_count, get_all_runs, _gcs_client
             init_db()
             n_co  = sp500_count()
-            n_run = len(get_all_runs())
+            n_run = len([r for r in get_all_runs() if r["status"] == "complete"])
             st.caption(f"🏢 {n_co} empresas cargadas")
-            st.caption(f"🎯 {n_run} scorecards guardados")
+            st.caption(f"🎯 {n_run} scorecards completos")
+            # GCS status
+            try:
+                _c, _b = _gcs_client()
+                if _b is not None:
+                    st.caption("☁️ GCS conectado ✅")
+                else:
+                    st.caption("☁️ GCS no configurado")
+            except Exception:
+                st.caption("☁️ GCS error ⚠️")
         except Exception:
             st.caption("Base de datos lista")
         st.divider()
