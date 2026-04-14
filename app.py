@@ -4460,23 +4460,19 @@ elif page == "🎯  Scorecard":
                     st.rerun()
 
     # Category multi-select (only shown in category mode)
+    ALL_CATS_WITH_CIRCULO = ["Circulo de Competencia"] + ALL_SCORED_CATS
     sc_selected_cats = ALL_SCORED_CATS  # default: all
+    sc_run_circulo = True
     if sc_run_mode == "Por categoría":
-        pending_cats = [c for c in ALL_SCORED_CATS if c not in _done_cats]
-        sc_selected_cats = st.multiselect(
+        pending_cats = [c for c in ALL_CATS_WITH_CIRCULO if c not in _done_cats]
+        sc_selected_all = st.multiselect(
             "Categorías a ejecutar",
-            options=ALL_SCORED_CATS,
+            options=ALL_CATS_WITH_CIRCULO,
             default=pending_cats,
             key="sc_cat_select",
         )
-        _circulo_done = "Circulo de Competencia" in _done_cats
-        sc_run_circulo = st.checkbox(
-            "Incluir Círculo de Competencia (contexto)",
-            value=not _circulo_done,
-            key="sc_run_circulo",
-        )
-    else:
-        sc_run_circulo = True
+        sc_run_circulo  = "Circulo de Competencia" in sc_selected_all
+        sc_selected_cats = [c for c in sc_selected_all if c != "Circulo de Competencia"]
 
     sc_run_btn = st.button(
         f"▶ Ejecutar — {sc_llm} {sc_pver.upper()} para {sc_selected_ticker}",
