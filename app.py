@@ -1629,7 +1629,7 @@ with st.sidebar:
     elif page == "🎯  Scorecard":
         st.markdown("**Base de datos**")
         try:
-            from scorecard_db import init_db, sp500_count, get_all_runs, _gcs_client
+            from scorecard_db import init_db, sp500_count, get_all_runs, _gcs_client, DB_PATH
             init_db()
             n_co  = sp500_count()
             n_run = len([r for r in get_all_runs() if r["status"] == "complete"])
@@ -1648,6 +1648,40 @@ with st.sidebar:
                     st.warning(f"GCS sync falló: {gcs_last_error}", icon="⚠️")
             except Exception:
                 st.caption("☁️ GCS error ⚠️")
+            # ── DB backup download / restore ───────────────────────────────
+            try:
+                import os as _os
+                if _os.path.exists(DB_PATH):
+                    with open(DB_PATH, "rb") as _f:
+                        _db_bytes = _f.read()
+                    st.download_button(
+                        label="⬇️ Backup DB",
+                        data=_db_bytes,
+                        file_name="scorecard_backup.db",
+                        mime="application/octet-stream",
+                        help="Descarga una copia local del scorecard.db — guárdala como respaldo.",
+                        use_container_width=True,
+                        key="sb_dl_db",
+                    )
+            except Exception:
+                pass
+            # Restore: upload a .db file → overwrites local DB and pushes to GCS
+            _up = st.file_uploader(
+                "Restaurar DB",
+                type=["db"],
+                help="Sube un scorecard_backup.db para restaurarlo en GCS.",
+                key="sb_restore_db",
+                label_visibility="collapsed",
+            )
+            if _up is not None:
+                try:
+                    from scorecard_db import gcs_upload as _gcs_upload, DB_PATH as _DB_PATH
+                    with open(_DB_PATH, "wb") as _wf:
+                        _wf.write(_up.read())
+                    _gcs_upload()
+                    st.success("DB restaurada y subida a GCS. Recarga la página.")
+                except Exception as _e:
+                    st.error(f"Error al restaurar: {_e}")
         except Exception:
             st.caption("Base de datos lista")
         st.divider()
