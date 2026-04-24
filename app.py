@@ -4189,9 +4189,11 @@ elif page == "🎯  Scorecard":
     def _ensure_sp500_loaded():
         csv_rows = _load_sp500_csv()
         # Reload whenever the DB has fewer companies than the CSV
-        # (handles first run AND upgrades from SP500-only to SP500+SP400+SP600)
+        # (handles first run AND upgrades from SP500-only to SP500+SP400+SP600).
+        # upload=False: seeding local cache from CSV must NOT overwrite GCS —
+        # GCS already has the authoritative DB (with all scorecard runs).
         if sp500_count() < len(csv_rows):
-            upsert_sp500_companies(csv_rows)
+            upsert_sp500_companies(csv_rows, upload=False)
 
     _ensure_sp500_loaded()
 

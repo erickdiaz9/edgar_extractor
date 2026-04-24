@@ -165,8 +165,10 @@ def init_db():
 
 # ── S&P 500 cache ─────────────────────────────────────────────────────────────
 
-def upsert_sp500_companies(rows: list[dict]):
-    """Insert or replace company metadata. rows: [{ticker, name, sector, industry, index_member, cik, sic_code, sic_desc}]"""
+def upsert_sp500_companies(rows: list[dict], upload: bool = True):
+    """Insert or replace company metadata. rows: [{ticker, name, sector, industry, index_member, cik, sic_code, sic_desc}]
+    Pass upload=False when seeding the local cache from CSV on startup — avoids overwriting GCS
+    with a DB that may not yet have the runs downloaded from GCS."""
     with get_conn() as conn:
         conn.executemany(
             """
@@ -188,7 +190,8 @@ def upsert_sp500_companies(rows: list[dict]):
               "sic_desc":     r.get("sic_desc", ""),
               } for r in rows],
         )
-    gcs_upload()
+    if upload:
+        gcs_upload()
 
 
 def upsert_kpis(rows: list[dict]):
