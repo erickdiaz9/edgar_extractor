@@ -99,6 +99,10 @@ CREATE TABLE IF NOT EXISTS sp500_cache (
     name            TEXT,
     sector          TEXT,
     industry        TEXT,
+    index_member    TEXT,          -- 'SP500' | 'SP400' | 'SP600'
+    cik             TEXT,
+    sic_code        TEXT,
+    sic_desc        TEXT,
     last_price      REAL,
     market_cap      REAL,
     pe_ratio        REAL,
@@ -147,23 +151,42 @@ def get_conn() -> sqlite3.Connection:
 def init_db():
     with get_conn() as conn:
         conn.executescript(SCHEMA)
+        # Migrate existing DB: add new columns if missing
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(sp500_cache)").fetchall()}
+        for col, typedef in [
+            ("index_member", "TEXT"),
+            ("cik",          "TEXT"),
+            ("sic_code",     "TEXT"),
+            ("sic_desc",     "TEXT"),
+        ]:
+            if col not in existing:
+                conn.execute(f"ALTER TABLE sp500_cache ADD COLUMN {col} {typedef}")
 
 
 # ── S&P 500 cache ─────────────────────────────────────────────────────────────
 
 def upsert_sp500_companies(rows: list[dict]):
-    """Insert or replace company metadata (no KPIs). rows: [{ticker, name, sector, industry}]"""
+    """Insert or replace company metadata. rows: [{ticker, name, sector, industry, index_member, cik, sic_code, sic_desc}]"""
     with get_conn() as conn:
         conn.executemany(
             """
-            INSERT INTO sp500_cache (ticker, name, sector, industry)
-            VALUES (:ticker, :name, :sector, :industry)
+            INSERT INTO sp500_cache (ticker, name, sector, industry, index_member, cik, sic_code, sic_desc)
+            VALUES (:ticker, :name, :sector, :industry, :index_member, :cik, :sic_code, :sic_desc)
             ON CONFLICT(ticker) DO UPDATE SET
-                name     = excluded.name,
-                sector   = excluded.sector,
-                industry = excluded.industry
+                name         = excluded.name,
+                sector       = excluded.sector,
+                industry     = excluded.industry,
+                index_member = excluded.index_member,
+                cik          = excluded.cik,
+                sic_code     = excluded.sic_code,
+                sic_desc     = excluded.sic_desc
             """,
-            rows,
+            [{**r,
+              "index_member": r.get("index_member", "SP500"),
+              "cik":          r.get("cik", ""),
+              "sic_code":     r.get("sic_code", ""),
+              "sic_desc":     r.get("sic_desc", ""),
+              } for r in rows],
         )
     gcs_upload()
 

@@ -1652,8 +1652,8 @@ with st.sidebar:
             st.caption("Base de datos lista")
         st.divider()
         st.info(
-            "Selecciona una empresa del S&P 500, configura el LLM y "
-            "ejecuta el algoritmo de scoring con tus 72 preguntas."
+            "Selecciona una empresa del S&P 500 / 400 / 600, configura el LLM y "
+            "ejecuta el algoritmo de scoring con tus 74 preguntas."
         )
 
 
@@ -4074,9 +4074,24 @@ elif page == "🎯  Scorecard":
                 return int(n)
         return None
 
-    def _build_prompt(q: dict, ticker: str, version: str) -> str:
+    def _build_prompt(q: dict, ticker: str, version: str, company_info: dict | None = None) -> str:
         raw = q[f"prompt_{version}"] if f"prompt_{version}" in q and q[f"prompt_{version}"] else q["pregunta"]
         prompt = raw.replace("[EMPRESA]", ticker).replace("[empresa]", ticker)
+        # Inject company context header so the LLM knows exactly which company
+        if company_info:
+            name    = company_info.get("name", "")
+            index   = company_info.get("index_member", "")
+            sector  = company_info.get("sector", "")
+            sic     = company_info.get("sic_code", "")
+            sic_d   = company_info.get("sic_desc", "")
+            sic_str = f"{sic} — {sic_d}" if sic and sic_d else sic or "N/D"
+            header  = (
+                f"=== EMPRESA A ANALIZAR ===\n"
+                f"Ticker: {ticker}  |  Nombre: {name}  |  Índice: {index}\n"
+                f"Sector: {sector}  |  SIC: {sic_str}\n"
+                f"==========================\n\n"
+            )
+            prompt = header + prompt
         return prompt + SCORE_SUFFIX
 
     def _score_color(s):
@@ -4161,13 +4176,22 @@ elif page == "🎯  Scorecard":
 
     @st.cache_data(ttl=None, show_spinner=False)
     def _load_sp500_csv() -> list[dict]:
-        df = pd.read_csv(_SP500_CSV, encoding="utf-8")
+        df = pd.read_csv(_SP500_CSV, encoding="utf-8", dtype=str)
+        # Normalise column names (strip spaces)
+        df.columns = [c.strip() for c in df.columns]
+        # Fill optional columns that may be missing in older CSV versions
+        for col in ("index_member", "cik", "sic_code", "sic_desc"):
+            if col not in df.columns:
+                df[col] = ""
+        df = df.fillna("")
         return df.to_dict("records")
 
     def _ensure_sp500_loaded():
-        if sp500_count() == 0:
-            rows = _load_sp500_csv()
-            upsert_sp500_companies(rows)
+        csv_rows = _load_sp500_csv()
+        # Reload whenever the DB has fewer companies than the CSV
+        # (handles first run AND upgrades from SP500-only to SP500+SP400+SP600)
+        if sp500_count() < len(csv_rows):
+            upsert_sp500_companies(csv_rows)
 
     _ensure_sp500_loaded()
 
@@ -4188,14 +4212,14 @@ elif page == "🎯  Scorecard":
     # ══════════════════════════════════════════════════════════════════════════
     # MAIN LAYOUT: two-panel  (list left / detail right)
     # ══════════════════════════════════════════════════════════════════════════
-    st.markdown("## 🎯 Scorecard — S&P 500")
+    st.markdown("## 🎯 Scorecard — S&P 500 · S&P 400 · S&P 600")
     st.caption(
-        "72 preguntas de Value Investing · 6 categorías ponderadas · "
+        "74 preguntas de Value Investing · 6 categorías ponderadas · "
         "Gemini y Claude · Prompt V1 y V2"
     )
 
-    # ── Top controls: search + KPI refresh ────────────────────────────────────
-    ctrl_c1, ctrl_c2, ctrl_c3 = st.columns([3, 1, 1])
+    # ── Top controls: search + filters + KPI refresh ───────────────────────────
+    ctrl_c1, ctrl_c2, ctrl_c3, ctrl_c4 = st.columns([2, 1, 1, 1])
     with ctrl_c1:
         sc_search = st.text_input(
             "Buscar empresa",
@@ -4211,6 +4235,13 @@ elif page == "🎯  Scorecard":
             label_visibility="collapsed",
         )
     with ctrl_c3:
+        sc_index_filter = st.selectbox(
+            "Índice",
+            options=["Todos", "SP500", "SP400", "SP600"],
+            key="sc_index_filter",
+            label_visibility="collapsed",
+        )
+    with ctrl_c4:
         sc_refresh_kpi = st.button("🔄 Refresh KPIs", use_container_width=True, key="sc_refresh_kpi")
 
     # ── KPI batch refresh ─────────────────────────────────────────────────────
@@ -4254,6 +4285,8 @@ elif page == "🎯  Scorecard":
                       or sc_search in (r.get("name") or "").upper()]
     if sc_sector != "Todos":
         sp500_rows = [r for r in sp500_rows if r.get("sector") == sc_sector]
+    if sc_index_filter != "Todos":
+        sp500_rows = [r for r in sp500_rows if r.get("index_member") == sc_index_filter]
 
     def _fmt_mktcap(v):
         if v is None: return "—"
@@ -4526,7 +4559,7 @@ elif page == "🎯  Scorecard":
                     # Circulo de Competencia
                     for q in circulo_to_run:
                         status_box.caption(f"🔍 Contexto: {q['pregunta'][:70]}…")
-                        prompt = _build_prompt(q, sc_selected_ticker, sc_pver)
+                        prompt = _build_prompt(q, sc_selected_ticker, sc_pver, company_info=_co_info)
                         try:
                             if llm_key == "gemini":
                                 ans = _call_with_retry(
@@ -4554,7 +4587,7 @@ elif page == "🎯  Scorecard":
                         status_box.caption(
                             f"📊 [{q['categoria']}] {q['pregunta'][:65]}…"
                         )
-                        prompt = _build_prompt(q, sc_selected_ticker, sc_pver)
+                        prompt = _build_prompt(q, sc_selected_ticker, sc_pver, company_info=_co_info)
                         try:
                             if llm_key == "gemini":
                                 ans = _call_with_retry(
@@ -4732,14 +4765,14 @@ elif page == "🎯  Scorecard":
             # ── Export ────────────────────────────────────────────────────────
             _answers = get_answers(_run["run_id"])
 
-            def _build_export_df(answers, run, questions_lookup):
+            def _build_export_df(answers, run, questions_lookup, co_info=None):
                 import io
                 rows = []
                 for a in answers:
                     q_data = questions_lookup.get(a["question_id"])
                     pver   = a.get("prompt_used", run["prompt_version"])
                     full_prompt = (
-                        _build_prompt(q_data, run["ticker"], pver)
+                        _build_prompt(q_data, run["ticker"], pver, company_info=co_info)
                         if q_data else ""
                     )
                     rows.append({
@@ -4753,7 +4786,7 @@ elif page == "🎯  Scorecard":
                 return pd.DataFrame(rows)
 
             _q_lookup = {q["id"]: q for q in SC_QUESTIONS}
-            _exp_df   = _build_export_df(_answers, _run, _q_lookup)
+            _exp_df   = _build_export_df(_answers, _run, _q_lookup, co_info=_co_info)
 
             exp_c1, exp_c2 = st.columns(2)
             with exp_c1:
@@ -4839,7 +4872,7 @@ elif page == "🎯  Scorecard":
                         )
                         _prompt_ver = _a.get("prompt_used", _run["prompt_version"])
                         _full_prompt = (
-                            _build_prompt(_q_data, _run["ticker"], _prompt_ver)
+                            _build_prompt(_q_data, _run["ticker"], _prompt_ver, company_info=_co_info)
                             if _q_data else "(prompt no disponible)"
                         )
                         qa_col1, qa_col2 = st.columns(2)
