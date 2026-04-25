@@ -45,9 +45,24 @@ def _gcs_client():
         return None, None
 
 
+def gcs_enable_versioning():
+    """Enable object versioning on the bucket (idempotent — safe to call every startup)."""
+    try:
+        client, bucket = _gcs_client()
+        if bucket is None:
+            return
+        bucket.reload()          # fetch current bucket metadata
+        if not bucket.versioning_enabled:
+            bucket.versioning_enabled = True
+            bucket.patch()       # persist the change
+    except Exception:
+        pass                     # non-fatal — don't break the app
+
+
 def gcs_download():
     """Download scorecard.db from GCS if it exists. Call once at app startup."""
     global gcs_ok, gcs_last_error
+    gcs_enable_versioning()      # ensure versioning is on so future uploads are recoverable
     client, bucket = _gcs_client()
     if bucket is None:
         return
