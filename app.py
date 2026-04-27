@@ -4226,7 +4226,12 @@ elif page == "🎯  Scorecard":
         # (handles first run AND upgrades from SP500-only to SP500+SP400+SP600).
         # upload=False: seeding local cache from CSV must NOT overwrite GCS —
         # GCS already has the authoritative DB (with all scorecard runs).
-        if sp500_count() < len(csv_rows):
+        try:
+            if sp500_count() < len(csv_rows):
+                upsert_sp500_companies(csv_rows, upload=False)
+        except Exception:
+            # DB corrupt or missing — reinitialise schema then seed from CSV
+            init_db()
             upsert_sp500_companies(csv_rows, upload=False)
 
     _ensure_sp500_loaded()

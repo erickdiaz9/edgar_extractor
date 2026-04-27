@@ -59,6 +59,19 @@ def gcs_enable_versioning():
         pass                     # non-fatal — don't break the app
 
 
+def _is_valid_sqlite(path: str) -> bool:
+    """Return True if path is a readable, non-corrupt SQLite database."""
+    if not os.path.exists(path) or os.path.getsize(path) < 100:
+        return False
+    try:
+        conn = sqlite3.connect(path)
+        conn.execute("SELECT 1")
+        conn.close()
+        return True
+    except Exception:
+        return False
+
+
 def gcs_download():
     """Download scorecard.db from GCS if it exists. Call once at app startup."""
     global gcs_ok, gcs_last_error
@@ -71,6 +84,10 @@ def gcs_download():
             blob = bucket.blob(GCS_BLOB_NAME)
             if blob.exists():
                 blob.download_to_filename(DB_PATH)
+                # Validate — a corrupt/partial download must not replace a good local DB
+                if not _is_valid_sqlite(DB_PATH):
+                    os.remove(DB_PATH)
+                    raise RuntimeError("Downloaded file is not a valid SQLite database")
             gcs_ok = True
             gcs_last_error = ""
             return
@@ -237,8 +254,11 @@ def get_sp500_list() -> list[dict]:
 
 
 def sp500_count() -> int:
-    with get_conn() as conn:
-        return conn.execute("SELECT COUNT(*) FROM sp500_cache").fetchone()[0]
+    try:
+        with get_conn() as conn:
+            return conn.execute("SELECT COUNT(*) FROM sp500_cache").fetchone()[0]
+    except Exception:
+        return 0
 
 
 # ── Scorecard runs ────────────────────────────────────────────────────────────
