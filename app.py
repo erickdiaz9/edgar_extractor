@@ -4205,34 +4205,101 @@ elif page == "🎯  Scorecard":
                     raise
         raise RuntimeError("Máximo de reintentos alcanzado")
 
-    # ── S&P 500 list load / refresh ────────────────────────────────────────────
-    _SP500_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sp500_list.csv")
+    # ── Company list — Google Sheets as primary source ─────────────────────────
+    _GSHEET_URL = (
+        "https://docs.google.com/spreadsheets/d/e/"
+        "2PACX-1vTiCPfb9O_EpBlfLD9f5sutYQSZtCBI48YVTspTufa-12_2CKE1XfEHy4DB1HL-CP40H5kFTbDANELv"
+        "/pub?output=csv"
+    )
+    _SP500_CSV  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sp500_list.csv")
+    _INDEX_MAP  = {"S&P 500": "SP500", "S&P 400": "SP400", "S&P 600": "SP600"}
 
-    @st.cache_data(ttl=None, show_spinner=False)
-    def _load_sp500_csv() -> list[dict]:
-        df = pd.read_csv(_SP500_CSV, encoding="utf-8", dtype=str)
-        # Normalise column names (strip spaces)
-        df.columns = [c.strip() for c in df.columns]
-        # Fill optional columns that may be missing in older CSV versions
-        for col in ("index_member", "cik", "sic_code", "sic_desc"):
-            if col not in df.columns:
-                df[col] = ""
-        df = df.fillna("")
-        return df.to_dict("records")
+    def _to_float(v):
+        try:
+            f = float(v)
+            return None if f != f else f   # NaN → None
+        except Exception:
+            return None
+
+    @st.cache_data(ttl=3600, show_spinner=False)
+    def _fetch_company_list() -> list[dict]:
+        """Fetch company list + prices from Google Sheets (cached 1 h).
+        Falls back to local sp500_list.csv if the URL is unreachable."""
+        import io
+        import requests as _req
+        try:
+            resp = _req.get(_GSHEET_URL, timeout=20, allow_redirects=True)
+            resp.raise_for_status()
+            df = pd.read_csv(io.StringIO(resp.text))
+            rows = []
+            for _, r in df.iterrows():
+                ticker = str(r.get("ticker", "")).strip()
+                if not ticker:
+                    continue
+                rows.append({
+                    "ticker":       ticker,
+                    "name":         str(r.get("company", "")).strip(),
+                    "sector":       str(r.get("GICS_Sector", "")).strip(),
+                    "industry":     str(r.get("GICS_Sub-Industry", "")).strip(),
+                    "index_member": _INDEX_MAP.get(str(r.get("index", "")).strip(), "SP500"),
+                    "cik":          str(r.get("CIK", "")).strip(),
+                    "sic_code":     "",   # not in Google Sheet; preserved in DB from prior loads
+                    "sic_desc":     "",
+                    "last_price":   _to_float(r.get("price")),
+                    "market_cap":   _to_float(r.get("marketcap")),
+                    "pe_ratio":     _to_float(r.get("pe")),
+                })
+            return rows
+        except Exception:
+            # ── Fallback: local CSV ────────────────────────────────────────────
+            df = pd.read_csv(_SP500_CSV, encoding="utf-8", dtype=str)
+            df.columns = [c.strip() for c in df.columns]
+            for col in ("index_member", "cik", "sic_code", "sic_desc",
+                        "last_price", "market_cap", "pe_ratio"):
+                if col not in df.columns:
+                    df[col] = ""
+            df = df.fillna("")
+            rows = []
+            for _, r in df.iterrows():
+                ticker = str(r.get("ticker", "")).strip()
+                if not ticker:
+                    continue
+                rows.append({
+                    "ticker":       ticker,
+                    "name":         str(r.get("name", r.get("company", ""))).strip(),
+                    "sector":       str(r.get("sector", r.get("GICS_Sector", ""))).strip(),
+                    "industry":     str(r.get("industry", r.get("GICS_Sub-Industry", ""))).strip(),
+                    "index_member": str(r.get("index_member", "SP500")).strip(),
+                    "cik":          str(r.get("cik", r.get("CIK", ""))).strip(),
+                    "sic_code":     str(r.get("sic_code", "")).strip(),
+                    "sic_desc":     str(r.get("sic_desc", "")).strip(),
+                    "last_price":   _to_float(r.get("last_price", r.get("price"))),
+                    "market_cap":   _to_float(r.get("market_cap", r.get("marketcap"))),
+                    "pe_ratio":     _to_float(r.get("pe_ratio", r.get("pe"))),
+                })
+            return rows
 
     def _ensure_sp500_loaded():
-        csv_rows = _load_sp500_csv()
-        # Reload whenever the DB has fewer companies than the CSV
-        # (handles first run AND upgrades from SP500-only to SP500+SP400+SP600).
-        # upload=False: seeding local cache from CSV must NOT overwrite GCS —
-        # GCS already has the authoritative DB (with all scorecard runs).
+        rows = _fetch_company_list()
         try:
-            if sp500_count() < len(csv_rows):
-                upsert_sp500_companies(csv_rows, upload=False)
+            current = sp500_count()
         except Exception:
-            # DB corrupt or missing — reinitialise schema then seed from CSV
+            current = 0
+        try:
+            if current < len(rows):
+                # Upsert company metadata — no GCS upload (GCS is authoritative)
+                upsert_sp500_companies(rows, upload=False)
+                # Upsert prices from Google Sheet — triggers one GCS upload
+                kpi_rows = [
+                    {"ticker": r["ticker"], "last_price": r["last_price"],
+                     "market_cap": r["market_cap"], "pe_ratio": r["pe_ratio"]}
+                    for r in rows
+                ]
+                upsert_kpis(kpi_rows)
+        except Exception:
+            # DB corrupt or missing — reinitialise then seed
             init_db()
-            upsert_sp500_companies(csv_rows, upload=False)
+            upsert_sp500_companies(rows, upload=False)
 
     _ensure_sp500_loaded()
 
@@ -4283,37 +4350,23 @@ elif page == "🎯  Scorecard":
             label_visibility="collapsed",
         )
     with ctrl_c4:
-        sc_refresh_kpi = st.button("🔄 Refresh KPIs", use_container_width=True, key="sc_refresh_kpi")
+        sc_refresh_kpi = st.button("🔄 Actualizar precios", use_container_width=True, key="sc_refresh_kpi")
 
-    # ── KPI batch refresh ─────────────────────────────────────────────────────
+    # ── KPI refresh from Google Sheets ────────────────────────────────────────
     if sc_refresh_kpi:
-        import yfinance as yf
-        all_tickers = [r["ticker"] for r in get_sp500_list()]
-        prog = st.progress(0, text="Descargando precios…")
-        batch_size = 50
-        kpi_rows = []
-        for i in range(0, len(all_tickers), batch_size):
-            batch = all_tickers[i: i + batch_size]
-            prog.progress((i + batch_size) / len(all_tickers), text=f"KPIs {i}–{i+batch_size} / {len(all_tickers)}…")
-            try:
-                raw = yf.Tickers(" ".join(batch))
-                for tk in batch:
-                    try:
-                        info = raw.tickers[tk].fast_info
-                        kpi_rows.append({
-                            "ticker":     tk,
-                            "last_price": getattr(info, "last_price",  None),
-                            "market_cap": getattr(info, "market_cap",  None),
-                            "pe_ratio":   getattr(info, "pe_ratio",    None),
-                        })
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-        if kpi_rows:
-            upsert_kpis(kpi_rows)
-        prog.empty()
-        st.success(f"KPIs actualizados para {len(kpi_rows)} empresas.")
+        with st.spinner("Descargando precios desde Google Sheets…"):
+            _fetch_company_list.clear()          # bust the 1-hour cache
+            fresh_rows = _fetch_company_list()   # re-fetch now
+            kpi_rows = [
+                {"ticker": r["ticker"], "last_price": r["last_price"],
+                 "market_cap": r["market_cap"], "pe_ratio": r["pe_ratio"]}
+                for r in fresh_rows if r["ticker"]
+            ]
+            if kpi_rows:
+                # Also sync any new companies that may have been added to the sheet
+                upsert_sp500_companies(fresh_rows, upload=False)
+                upsert_kpis(kpi_rows)
+        st.success(f"✅ {len(kpi_rows)} empresas actualizadas desde Google Sheets.")
         st.rerun()
 
     # ── Build display dataframe ────────────────────────────────────────────────

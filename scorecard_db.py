@@ -212,8 +212,8 @@ def upsert_sp500_companies(rows: list[dict], upload: bool = True):
                 industry     = excluded.industry,
                 index_member = excluded.index_member,
                 cik          = excluded.cik,
-                sic_code     = excluded.sic_code,
-                sic_desc     = excluded.sic_desc
+                sic_code     = CASE WHEN excluded.sic_code != '' THEN excluded.sic_code ELSE sic_code END,
+                sic_desc     = CASE WHEN excluded.sic_desc != '' THEN excluded.sic_desc ELSE sic_desc END
             """,
             [{**r,
               "index_member": r.get("index_member", "SP500"),
