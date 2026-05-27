@@ -3279,7 +3279,7 @@ elif page == "📉  Drawdown":
     )
 
     # ── Ticker input ──────────────────────────────────────────────────────────
-    dd_c1, dd_c2, dd_c3, dd_c4, dd_c5 = st.columns([2, 1, 1, 1, 2])
+    dd_c1, dd_c2, dd_c3, dd_c4 = st.columns([2, 1, 1, 3])
     with dd_c1:
         dd_ticker = st.text_input(
             "Stock Ticker",
@@ -3297,16 +3297,6 @@ elif page == "📉  Drawdown":
             label_visibility="collapsed",
         )
     with dd_c3:
-        dd_price_type = st.selectbox(
-            "Precio",
-            options=["Adjusted", "Unadjusted"],
-            index=0,
-            key="dd_price_type",
-            label_visibility="collapsed",
-            help="Adjusted: close price retroactively corrected for dividends & splits. "
-                 "Unadjusted: raw close price as it traded that day.",
-        )
-    with dd_c4:
         st.markdown("<br>", unsafe_allow_html=True)
         dd_run = st.button("📊 Analyze", type="primary", use_container_width=True)
 
@@ -3323,11 +3313,14 @@ elif page == "📉  Drawdown":
 
     # ── Download / cache price data ───────────────────────────────────────────
     @st.cache_data(ttl=3600, show_spinner=False)
-    def _dd_fetch(ticker: str, start_date: str | None, adjusted: bool) -> pd.DataFrame | None:
+    def _dd_fetch(ticker: str, start_date: str | None) -> pd.DataFrame | None:
         try:
             import yfinance as yf
             tk_obj = yf.Ticker(ticker)
-            kwargs = {"interval": "1d", "auto_adjust": adjusted}
+            # auto_adjust=False → "Close" is split-adjusted only (no dividend adjustment).
+            # Dividend adjustment distorts drawdown analysis — a dividend payment reduces
+            # the stock price but is NOT a loss for the investor holding the stock.
+            kwargs = {"interval": "1d", "auto_adjust": False}
             if start_date:
                 kwargs["start"] = start_date
             else:
@@ -3336,19 +3329,14 @@ elif page == "📉  Drawdown":
             if hist.empty:
                 return None
             hist.index = pd.to_datetime(hist.index).tz_localize(None)
-            # With auto_adjust=False yfinance returns "Adj Close" alongside "Close"
-            price_col = "Close" if adjusted else "Adj Close"
-            if price_col not in hist.columns:
-                price_col = "Close"
-            df = hist[[price_col]].rename(columns={price_col: "price"}).copy()
+            df = hist[["Close"]].rename(columns={"Close": "price"}).copy()
             df.index.name = "date"
             return df
         except Exception:
             return None
 
-    dd_adjusted = (dd_price_type == "Adjusted")
     with st.spinner(f"Downloading price history for **{dd_ticker_active}**…"):
-        dd_df = _dd_fetch(dd_ticker_active, dd_start_date, dd_adjusted)
+        dd_df = _dd_fetch(dd_ticker_active, dd_start_date)
 
     if dd_df is None or dd_df.empty:
         st.error(f"Could not download price data for **{dd_ticker_active}**. Check the ticker and try again.")
