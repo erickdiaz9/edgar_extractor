@@ -3307,7 +3307,7 @@ elif page == "📉  Drawdown":
         try:
             import yfinance as yf
             tk_obj = yf.Ticker(ticker)
-            hist   = tk_obj.history(period="max", interval="1d", auto_adjust=True)
+            hist   = tk_obj.history(start="1990-01-01", interval="1d", auto_adjust=True)
             if hist.empty:
                 return None
             hist.index = pd.to_datetime(hist.index).tz_localize(None)
