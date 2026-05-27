@@ -3279,7 +3279,7 @@ elif page == "📉  Drawdown":
     )
 
     # ── Ticker input ──────────────────────────────────────────────────────────
-    dd_c1, dd_c2, dd_c3 = st.columns([2, 1, 4])
+    dd_c1, dd_c2, dd_c3, dd_c4 = st.columns([2, 1, 1, 3])
     with dd_c1:
         dd_ticker = st.text_input(
             "Stock Ticker",
@@ -3289,6 +3289,14 @@ elif page == "📉  Drawdown":
             key="dd_ticker_input",
         ).strip().upper()
     with dd_c2:
+        dd_start = st.selectbox(
+            "Desde",
+            options=["1990", "2000", "All Years"],
+            index=0,
+            key="dd_start",
+            label_visibility="collapsed",
+        )
+    with dd_c3:
         st.markdown("<br>", unsafe_allow_html=True)
         dd_run = st.button("📊 Analyze", type="primary", use_container_width=True)
 
@@ -3301,13 +3309,20 @@ elif page == "📉  Drawdown":
         st.info("Enter a ticker above and click **📊 Analyze** to begin.")
         st.stop()
 
+    dd_start_date = None if dd_start == "All Years" else f"{dd_start}-01-01"
+
     # ── Download / cache price data ───────────────────────────────────────────
     @st.cache_data(ttl=3600, show_spinner=False)
-    def _dd_fetch(ticker: str) -> pd.DataFrame | None:
+    def _dd_fetch(ticker: str, start_date: str | None) -> pd.DataFrame | None:
         try:
             import yfinance as yf
             tk_obj = yf.Ticker(ticker)
-            hist   = tk_obj.history(start="1990-01-01", interval="1d", auto_adjust=True)
+            kwargs = {"interval": "1d", "auto_adjust": True}
+            if start_date:
+                kwargs["start"] = start_date
+            else:
+                kwargs["period"] = "max"
+            hist   = tk_obj.history(**kwargs)
             if hist.empty:
                 return None
             hist.index = pd.to_datetime(hist.index).tz_localize(None)
@@ -3318,7 +3333,7 @@ elif page == "📉  Drawdown":
             return None
 
     with st.spinner(f"Downloading price history for **{dd_ticker_active}**…"):
-        dd_df = _dd_fetch(dd_ticker_active)
+        dd_df = _dd_fetch(dd_ticker_active, dd_start_date)
 
     if dd_df is None or dd_df.empty:
         st.error(f"Could not download price data for **{dd_ticker_active}**. Check the ticker and try again.")
