@@ -3644,7 +3644,7 @@ elif page == "📊  Returns":
         tr_run = st.button("📊 Analyze", type="primary", use_container_width=True)
 
     # ── Settings ──────────────────────────────────────────────────────────────
-    set_c1, set_c2, set_c3 = st.columns([2, 2, 2])
+    set_c1, set_c2, set_c3, set_c4 = st.columns([2, 2, 2, 2])
     with set_c1:
         tr_periods = st.multiselect(
             "Holding Periods",
@@ -3670,6 +3670,14 @@ elif page == "📊  Returns":
         tr_n_boot = int(st.number_input(
             "Bootstrap Samples", min_value=100, max_value=2000, value=500, step=100, key="tr_n_boot",
         ))
+    with set_c4:
+        tr_boot_pool = st.selectbox(
+            "Bootstrap Pool (desde)",
+            options=["All Years", "1990", "2000", "2010"],
+            index=0,
+            key="tr_boot_pool",
+            help="Limit the historical entry-point pool used for bootstrap sampling.",
+        )
 
     if tr_run and tr_ticker:
         st.session_state["tr_ticker_val"] = tr_ticker
@@ -3758,7 +3766,9 @@ elif page == "📊  Returns":
     def _tr_bootstrap(
         df_s: pd.DataFrame, df_b: pd.DataFrame,
         yrs: int, n: int,
-        incl: bool, drip: bool, cr: float, seed: int = 42,
+        incl: bool, drip: bool, cr: float,
+        pool_start: str = "All Years",
+        seed: int = 42,
     ):
         import numpy as _np2
 
@@ -3797,6 +3807,8 @@ elif page == "📊  Returns":
         _np2.random.seed(seed)
         cutoff = df_s.index[-1] - pd.DateOffset(years=yrs)
         valid  = df_s.index[df_s.index <= cutoff]
+        if pool_start != "All Years":
+            valid = valid[valid >= pd.Timestamp(f"{pool_start}-01-01")]
         if len(valid) < 30:
             return None
         replace = n > len(valid)
@@ -3971,6 +3983,7 @@ elif page == "📊  Returns":
                 tr_df_stock, tr_df_bench,
                 yrs, tr_n_boot,
                 inc_div, reinvest_div, tr_cash_rate,
+                pool_start=tr_boot_pool,
             )
             for yrs in tr_periods_active
         }
