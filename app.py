@@ -1509,7 +1509,7 @@ with st.sidebar:
     # ── Top-level navigation (persists across reruns) ────────────────────────
     page = st.radio(
         "Page",
-        options=["📁  Filings", "📈  KPI Explorer", "💰  Model DCF", "📉  Drawdown", "📊  Returns", "🎯  Scorecard"],
+        options=["📁  Filings", "📈  KPI Explorer", "💰  Model DCF", "📉  Drawdown", "📊  Returns", "🎯  Scorecard", "📚  Help"],
         label_visibility="collapsed",
         horizontal=True,
         key="nav_page",
@@ -5007,4 +5007,192 @@ elif page == "🎯  Scorecard":
                         with qa_col2:
                             with st.expander("Ver respuesta completa", expanded=False):
                                 st.markdown(_a.get("answer_text", ""), unsafe_allow_html=False)
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  PAGE: HELP / DOCUMENTATION
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "📚  Help":
+    st.markdown("## 📚 Documentation")
+    st.caption("SEC Filings Explorer — feature reference for all modules.")
+
+    # ── Filings ───────────────────────────────────────────────────────────────
+    with st.expander("📁  Filings (Beta)", expanded=True):
+        st.markdown("""
+**What it does:** Browse and download official SEC filings for any U.S. public company directly from EDGAR.
+
+**How to use:**
+1. Enter a ticker (e.g. `AAPL`, `MSFT`) in the sidebar and click **🔍 Search**.
+2. Select a folder type — **10-K** (annual reports), **10-Q** (quarterly reports), or **JSON** (raw XBRL data).
+3. Click **⬇ Fetch** on individual filings, or **Fetch All** to download everything at once.
+4. Once fetched, use **💾 Save file** to download, or **💾 Save All as ZIP** to bundle the whole folder.
+
+**Key details:**
+- Filing table shows: form type, description, period covered, date filed, and file size.
+- Recent searches are saved for quick re-access (last 8 tickers).
+- The JSON folder contains XBRL company facts — this is the raw data used by KPI Explorer.
+- Files are cached in memory for 10 minutes; the page supports up to 40 files at once.
+""")
+
+    # ── KPI Explorer ──────────────────────────────────────────────────────────
+    with st.expander("📈  KPI Explorer (Beta)", expanded=False):
+        st.markdown("""
+**What it does:** Load one or more companies and explore any financial metric from their XBRL filings — with charts, growth rates, and multi-company comparison.
+
+**How to use:**
+1. Enter one or more tickers separated by commas (e.g. `AAPL, MSFT, GOOGL`) and click **📊 Load**.
+2. Choose a view mode:
+   - **Standardized Financials** — pre-built Income Statement, Balance Sheet, Cash Flow, and Derived Metrics tables.
+   - **Raw KPI Explorer** — pick any XBRL concept from a searchable dropdown.
+
+**Standardized Financials features:**
+- HTML tables with fiscal year columns (newest first, up to 11 years).
+- Select any metric to generate a multi-company comparison line chart.
+- **Compare Companies** tab for side-by-side analysis.
+- Download any statement as CSV.
+
+**Raw KPI Explorer features:**
+- Access every XBRL tag filed with the SEC (thousands of metrics).
+- Toggle between Annual and Quarterly data.
+- **Index to 100** — normalize all companies to a common base year for relative comparison.
+- **Show YoY %** — display year-over-year growth rates instead of absolute values.
+- CAGR cards (all-time, 5Y, 3Y) per company for the selected metric.
+""")
+
+    # ── DCF Model ─────────────────────────────────────────────────────────────
+    with st.expander("💰  Model DCF (Beta)", expanded=False):
+        st.markdown("""
+**What it does:** Run a Reverse DCF to back out the growth rate implied by today's stock price, and a Forward DCF to estimate intrinsic value per share.
+
+> **Requires KPI Explorer to have at least one company loaded first.**
+
+---
+
+**⏪ Reverse DCF**
+
+Answers the question: *"What growth rate does the market assume?"*
+
+- Inputs: Risk-Free Rate, Beta, Equity Risk Premium → computes **Cost of Equity (CAPM)**.
+- Inputs: Cost of Debt, Tax Rate, capital structure → computes **WACC**.
+- **Model A — FCF/WACC**: Solves `EV = FCF × (1+g) / (WACC − g)` for implied FCF growth `g`.
+- **Model B — DDM**: Solves `Price = DPS × (1+g) / (r_e − g)` for implied dividend growth `g`.
+- **Sensitivity table**: Shows implied growth for WACC ± 1pp and EV ± 10% combinations.
+
+---
+
+**📊 Forward DCF**
+
+Answers the question: *"What is the company worth?"*
+
+- Shows a historical FCF bridge: Revenue → EBITDA → EBIT → NOPAT → FCFF (7 years).
+- Inputs: Year 1–3 growth rate, Terminal growth rate.
+- Projects FCF, discounts at WACC, sums PV of cash flows + terminal value.
+- **Output**: Intrinsic Value per Share vs. current price → upside/downside %.
+""")
+
+    # ── Drawdown ──────────────────────────────────────────────────────────────
+    with st.expander("📉  Drawdown", expanded=False):
+        st.markdown("""
+**What it does:** Analyze historical intra-year drawdowns for any stock and calculate option strike price levels based on the 52-week high.
+
+**How to use:**
+1. Enter a ticker and select a **start year** (1990, 2000, or All Years).
+2. Click **📊 Analyze**.
+3. Select **drawdown levels** (e.g. −15%, −20%, −30%) to display as strike price lines on the chart.
+
+**Outputs:**
+- **Price & Drawdown Chart**: Stock price history (left axis) overlaid with intra-year drawdown % (right axis, red fill). Strike price levels shown as horizontal lines.
+- **Strike Prices Table**: For each selected level — strike price in $, % from current price, and historical probability of hitting that level in any given year.
+- **Drawdown Frequency Table**: How often (% of years) the stock experienced drawdowns in each bucket (0 to −5%, −5 to −10%, ..., worse than −60%).
+- **Distribution Bar Chart**: Visual histogram of the frequency table.
+- **Year-by-Year Table**: Worst cumulative and intra-year drawdown for each year.
+
+**Methodology:**
+- Uses split-adjusted daily closing prices (no dividend adjustment — dividends reduce the stock price but are not a loss to the investor).
+- Cumulative drawdown: `(price / all-time-high-to-date) − 1`.
+- Intra-year drawdown: `(price / YTD-high-to-date) − 1`.
+""")
+
+    # ── Returns ───────────────────────────────────────────────────────────────
+    with st.expander("📊  Returns", expanded=False):
+        st.markdown("""
+**What it does:** Calculate buy-and-hold returns for a specific entry date, and run a bootstrap simulation to estimate the distribution of expected returns across all historical entry points.
+
+**How to use:**
+1. Enter a ticker and an **entry date**, then click **📊 Analyze**.
+2. Select **holding periods** (3Y, 5Y, 10Y — any combination).
+3. Configure dividend settings and bootstrap parameters.
+
+---
+
+**📅 Single Entry Analysis**
+
+Shows what actually happened if you bought on the selected date:
+- Total return % and CAGR for the stock vs. S&P 500 (SPY) for each holding period.
+- "$10,000 invested" terminal value.
+- Alpha = stock CAGR minus benchmark CAGR.
+- Portfolio growth chart over the holding period.
+
+**Dividend options:**
+- **Include Dividends**: Counts dividends as part of the return.
+- **Reinvest (DRIP)**: Dividends automatically buy more shares at the ex-date price.
+- **Cash rate**: If not reinvesting, dividends accumulate at a specified interest rate until exit.
+
+---
+
+**📊 Bootstrap Simulation**
+
+Randomly samples N historical entry dates to estimate the distribution of outcomes:
+- **Bootstrap Pool**: Limit entry dates to All Years / from 1990 / from 2000 / from 2010.
+- **Bootstrap Samples**: Number of random entry dates to sample (100–2,000).
+- **Output**: CAGR distribution histogram (stock vs. SPY), statistics table (mean, median, std dev, P10/P25/P75/P90, % positive, % beats SPY).
+""")
+
+    # ── Scorecard ─────────────────────────────────────────────────────────────
+    with st.expander("🎯  Scorecard", expanded=False):
+        st.markdown("""
+**What it does:** Run an AI-powered Value Investing scorecard on any company from the S&P 500, S&P 400 (mid-cap), or S&P 600 (small-cap). The model answers 74 research questions across 6 weighted categories and produces an overall score from 0 to 10.
+
+---
+
+**Categories and weights:**
+
+| Category | Weight | What it evaluates |
+|---|---|---|
+| Fuerzas (5 Forces) | 5% | Supplier power, buyer power, substitutes |
+| Industria | 5% | Industry structure, growth, competitive dynamics |
+| MOAT Company | 35% | Sustainable competitive advantages, barriers to entry |
+| Management & Culture | 20% | Leadership quality, capital allocation, incentives |
+| Brand | 5% | Brand strength, recognition, pricing power |
+| Finance | 30% | Revenue growth, margins, FCF, balance sheet |
+
+---
+
+**How to run a scorecard:**
+1. Search for a company in the table (filter by sector, index, or name).
+2. Select it to open the detail panel.
+3. Choose **LLM** (Gemini or Claude), **Prompt Version** (V1 or V2), and paste your API key.
+4. Select **Gemini model** (⚡ Fast ~7 MXN or 🧠 Pro ~35 MXN).
+5. Choose **run mode**: All categories at once, or category-by-category (useful for managing API costs and rate limits).
+6. Click **▶ Ejecutar**.
+
+**Resuming a partial run:**
+- If a run was interrupted, the app detects how many questions were answered and lets you resume from where you stopped — no re-spending on already-answered questions.
+
+**Results:**
+- Overall score (0–10) with weighted category breakdown bar chart.
+- Full Q&A export as **CSV** or **Excel** (includes the exact prompt sent to the model alongside each answer).
+- Expand each category to read the model's full response per question.
+
+**Prompts:**
+- **V1**: Standard prompts.
+- **V2**: Enhanced prompts (different wording / depth).
+- Each prompt includes a company header (Ticker, Name, Index, Sector, SIC code) so the AI correctly identifies less well-known companies.
+
+**Data backup:**
+- Results are stored in SQLite and synced to Google Cloud Storage after every answer.
+- Use **⬇️ Backup DB** in the sidebar to download a local copy after each run.
+""")
+
+    st.divider()
+    st.caption("SEC Filings Explorer · Built with Streamlit · Data: SEC EDGAR, Yahoo Finance, Google Sheets")
                         st.markdown("<hr style='margin:4px 0;border-color:#f1f5f9'>", unsafe_allow_html=True)
