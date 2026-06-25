@@ -5195,4 +5195,3 @@ Randomly samples N historical entry dates to estimate the distribution of outcom
 
     st.divider()
     st.caption("SEC Filings Explorer · Built with Streamlit · Data: SEC EDGAR, Yahoo Finance, Google Sheets")
-                        st.markdown("<hr style='margin:4px 0;border-color:#f1f5f9'>", unsafe_allow_html=True)
