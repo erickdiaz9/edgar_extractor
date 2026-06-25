@@ -1,5 +1,5 @@
 ﻿"""
-SEC Filings Explorer
+Elevation Rock
 ────────────────────
 Browse and download 10-K, 10-Q, and JSON filings from SEC EDGAR.
 Explore financial KPIs with interactive charts — powered by SEC EDGAR XBRL data.
@@ -18,11 +18,11 @@ from datetime import datetime
 
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SEC Filings Explorer",
+    page_title="Elevation Rock",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded",
-    menu_items={"About": "SEC Filings Explorer — powered by SEC EDGAR public APIs"},
+    menu_items={"About": "Elevation Rock — SEC filings, financial models & AI-powered value investing research"},
 )
 
 # ── Custom CSS ─────────────────────────────────────────────────────────────────
@@ -1502,8 +1502,8 @@ def run_kpi_load(tickers_raw: str) -> None:
 #  SIDEBAR
 # ══════════════════════════════════════════════════════════════════════════════
 with st.sidebar:
-    st.markdown("## 📊 SEC Filings Explorer")
-    st.caption("Data from [SEC EDGAR](https://www.sec.gov/edgar) public APIs")
+    st.markdown("## 📊 Elevation Rock")
+    st.caption("Filings · KPIs · DCF Models · Drawdown · Returns · AI Scorecard")
     st.divider()
 
     # ── Top-level navigation (persists across reruns) ────────────────────────
@@ -1706,7 +1706,7 @@ if page == "📁  Filings":
         st.markdown("""
         <div class="hero">
             <div style="font-size:64px;margin-bottom:16px">📊</div>
-            <h2>SEC Filings Explorer</h2>
+            <h2>Elevation Rock</h2>
             <p>
                 Search any US public company by ticker to browse and download
                 <strong>10-K</strong> annual reports, <strong>10-Q</strong> quarterly
@@ -5013,7 +5013,7 @@ elif page == "🎯  Scorecard":
 # ══════════════════════════════════════════════════════════════════════════════
 elif page == "📚  Help":
     st.markdown("## 📚 Documentation")
-    st.caption("SEC Filings Explorer — feature reference for all modules.")
+    st.caption("Elevation Rock — feature reference for all modules.")
 
     # ── Filings ───────────────────────────────────────────────────────────────
     with st.expander("📁  Filings (Beta)", expanded=True):
@@ -5194,4 +5194,4 @@ Randomly samples N historical entry dates to estimate the distribution of outcom
 """)
 
     st.divider()
-    st.caption("SEC Filings Explorer · Built with Streamlit · Data: SEC EDGAR, Yahoo Finance, Google Sheets")
+    st.caption("Elevation Rock · Built with Streamlit · Data: SEC EDGAR, Yahoo Finance, Google Sheets")
