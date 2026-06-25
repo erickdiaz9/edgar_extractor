@@ -226,8 +226,9 @@ def upsert_sp500_companies(rows: list[dict], upload: bool = True):
         gcs_upload()
 
 
-def upsert_kpis(rows: list[dict]):
-    """Update KPI columns for tickers. rows: [{ticker, last_price, market_cap, pe_ratio}]"""
+def upsert_kpis(rows: list[dict], upload: bool = True):
+    """Update KPI columns for tickers. rows: [{ticker, last_price, market_cap, pe_ratio}]
+    Pass upload=False during startup seeding to avoid overwriting GCS with a fresh empty DB."""
     ts = datetime.now().isoformat(timespec="minutes")
     with get_conn() as conn:
         conn.executemany(
@@ -242,7 +243,8 @@ def upsert_kpis(rows: list[dict]):
             """,
             [{**r, "ts": ts} for r in rows],
         )
-    gcs_upload()
+    if upload:
+        gcs_upload()
 
 
 def get_sp500_list() -> list[dict]:

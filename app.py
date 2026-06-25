@@ -4320,13 +4320,14 @@ elif page == "🎯  Scorecard":
             if current < len(rows):
                 # Upsert company metadata — no GCS upload (GCS is authoritative)
                 upsert_sp500_companies(rows, upload=False)
-                # Upsert prices from Google Sheet — triggers one GCS upload
+                # Upsert prices — no GCS upload; startup must never overwrite GCS
+                # (if GCS download failed, local DB is empty and an upload would destroy runs)
                 kpi_rows = [
                     {"ticker": r["ticker"], "last_price": r["last_price"],
                      "market_cap": r["market_cap"], "pe_ratio": r["pe_ratio"]}
                     for r in rows
                 ]
-                upsert_kpis(kpi_rows)
+                upsert_kpis(kpi_rows, upload=False)
         except Exception:
             # DB corrupt or missing — reinitialise then seed
             init_db()
