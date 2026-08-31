@@ -5284,8 +5284,7 @@ Incluye entre 2 y 6 fuentes. Prioriza documentos oficiales de la empresa sobre p
             if _faith_llm == "Gemini":
                 _faith_model = st.selectbox(
                     "Modelo Gemini",
-                    ["gemini-2.0-flash", "gemini-2.5-flash-preview-05-20",
-                     "gemini-2.5-pro-preview-06-05"],
+                    ["gemini-3-flash-preview", "gemini-3.1-pro-preview"],
                     key="faith_gemini_model",
                 )
             else:
