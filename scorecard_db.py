@@ -170,6 +170,30 @@ CREATE TABLE IF NOT EXISTS scorecard_answers (
     prompt_used   TEXT,           -- 'v1' or 'v2'
     FOREIGN KEY (run_id) REFERENCES scorecard_runs(run_id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS faith_runs (
+    run_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker      TEXT NOT NULL,
+    llm         TEXT NOT NULL,       -- 'gemini' | 'claude'
+    model_name  TEXT,
+    run_date    TEXT,
+    status      TEXT DEFAULT 'running',  -- 'running' | 'complete' | 'failed'
+    overall     TEXT                     -- 'PASS' | 'NO PASS' | NULL while running
+);
+
+CREATE TABLE IF NOT EXISTS faith_answers (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id              INTEGER NOT NULL,
+    question_id         INTEGER NOT NULL,
+    question_text       TEXT,
+    result              TEXT,    -- 'PASS' | 'NO PASS'
+    criteria            TEXT,
+    why_not_opposite    TEXT,
+    sources_json        TEXT,    -- JSON array of {tipo, nombre, link, resumen}
+    raw_answer          TEXT,
+    prompt_used         TEXT,
+    FOREIGN KEY (run_id) REFERENCES faith_runs(run_id) ON DELETE CASCADE
+);
 """
 
 
@@ -487,3 +511,98 @@ def compute_scores(answers: list[dict]) -> tuple[dict, float]:
         for cat, w in CATEGORY_WEIGHTS.items()
     )
     return category_avgs, total
+
+
+# ── Faith Scorecard helpers ───────────────────────────────────────────────────
+
+def create_faith_run(ticker: str, llm: str, model_name: str) -> int:
+    """Delete any prior faith run for this ticker+llm, create a fresh one. Returns run_id."""
+    with get_conn() as conn:
+        conn.execute(
+            "DELETE FROM faith_runs WHERE ticker = ? AND llm = ?",
+            (ticker, llm),
+        )
+        cur = conn.execute(
+            "INSERT INTO faith_runs (ticker, llm, model_name, run_date, status) "
+            "VALUES (?, ?, ?, ?, 'running')",
+            (ticker, llm, model_name, datetime.now().isoformat()),
+        )
+        run_id = cur.lastrowid
+    gcs_upload()
+    return run_id
+
+
+def save_faith_answer(
+    run_id: int,
+    question_id: int,
+    question_text: str,
+    result: str,
+    criteria: str,
+    why_not_opposite: str,
+    sources_json: str,
+    raw_answer: str,
+    prompt_used: str,
+):
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO faith_answers
+               (run_id, question_id, question_text, result, criteria,
+                why_not_opposite, sources_json, raw_answer, prompt_used)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (run_id, question_id, question_text, result, criteria,
+             why_not_opposite, sources_json, raw_answer, prompt_used),
+        )
+    gcs_upload()
+
+
+def finalize_faith_run(run_id: int, overall: str):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE faith_runs SET status='complete', overall=? WHERE run_id=?",
+            (overall, run_id),
+        )
+    gcs_upload()
+
+
+def mark_faith_run_failed(run_id: int):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE faith_runs SET status='failed' WHERE run_id=?",
+            (run_id,),
+        )
+    gcs_upload()
+
+
+def get_all_faith_runs() -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM faith_runs ORDER BY ticker, llm"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_faith_run(ticker: str, llm: str) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM faith_runs WHERE ticker=? AND llm=? ORDER BY run_date DESC LIMIT 1",
+            (ticker, llm),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def get_faith_answers(run_id: int) -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM faith_answers WHERE run_id=? ORDER BY question_id",
+            (run_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_answered_faith_ids(run_id: int) -> set[int]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT question_id FROM faith_answers WHERE run_id=?",
+            (run_id,),
+        ).fetchall()
+        return {r[0] for r in rows}

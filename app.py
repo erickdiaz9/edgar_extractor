@@ -1509,7 +1509,7 @@ with st.sidebar:
     # ── Top-level navigation (persists across reruns) ────────────────────────
     page = st.radio(
         "Page",
-        options=["📁  Filings", "📈  KPI Explorer", "💰  Model DCF", "📉  Drawdown", "📊  Returns", "🎯  Scorecard", "📚  Help"],
+        options=["📁  Filings", "📈  KPI Explorer", "💰  Model DCF", "📉  Drawdown", "📊  Returns", "🎯  Scorecard", "✝️  Faith Scorecard", "📚  Help"],
         label_visibility="collapsed",
         horizontal=True,
         key="nav_page",
@@ -1688,6 +1688,22 @@ with st.sidebar:
         st.info(
             "Selecciona una empresa del S&P 500 / 400 / 600, configura el LLM y "
             "ejecuta el algoritmo de scoring con tus 74 preguntas."
+        )
+
+    # ── Faith Scorecard sidebar ───────────────────────────────────────────────
+    elif page == "✝️  Faith Scorecard":
+        st.markdown("**Faith Scorecard**")
+        try:
+            from scorecard_db import init_db, get_all_faith_runs, DB_PATH
+            init_db()
+            n_faith = len([r for r in get_all_faith_runs() if r["status"] == "complete"])
+            st.caption(f"✝️ {n_faith} screeners completos")
+        except Exception:
+            pass
+        st.divider()
+        st.info(
+            "Selecciona una empresa y ejecuta el filtro de 7 criterios de fe. "
+            "Resultado: PASS o NO PASS por criterio."
         )
 
 
@@ -5008,6 +5024,507 @@ elif page == "🎯  Scorecard":
                         with qa_col2:
                             with st.expander("Ver respuesta completa", expanded=False):
                                 st.markdown(_a.get("answer_text", ""), unsafe_allow_html=False)
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  PAGE: FAITH SCORECARD
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "✝️  Faith Scorecard":
+    import json as _json
+    import re as _re
+    import time as _time
+
+    from scorecard_db import (
+        init_db, get_sp500_list, sp500_count,
+        create_faith_run, save_faith_answer, finalize_faith_run,
+        mark_faith_run_failed, get_all_faith_runs, get_faith_run,
+        get_faith_answers, get_answered_faith_ids,
+        gcs_download,
+    )
+
+    if not st.session_state.get("_faith_gcs_loaded"):
+        gcs_download()
+        st.session_state["_faith_gcs_loaded"] = True
+
+    init_db()
+
+    # ── 7 Faith questions ─────────────────────────────────────────────────────
+    FAITH_QUESTIONS = [
+        "¿La compañía tiene como negocio principal o apoya activamente la producción o distribución de abortivos o anticonceptivos, o la práctica de abortos?",
+        "¿La compañía tiene como negocio principal o apoya activamente la investigación con embriones o tejido fetal, la clonación, o la reproducción asistida ilícita?",
+        "¿La compañía tiene como negocio principal o apoya activamente la producción o distribución de pornografía y entretenimiento adulto?",
+        "¿La compañía tiene como negocio principal o apoya activamente la producción o venta de armas indiscriminadas o de destrucción masiva?",
+        "¿La compañía tiene como negocio principal o apoya activamente la eutanasia, o la producción o venta de drogas ilícitas?",
+        "¿La compañía tiene como negocio principal o apoya activamente el trabajo infantil, el trabajo indigno o la esclavitud moderna?",
+        "¿La compañía tiene como negocio principal o apoya activamente el mundo del juego de azar (gambling), como casinos o casas de apuestas?",
+    ]
+
+    FAITH_LABELS = [
+        "Aborto / Anticonceptivos",
+        "Embriones / Clonación / Reproducción asistida ilícita",
+        "Pornografía / Entretenimiento adulto",
+        "Armas indiscriminadas / Destrucción masiva",
+        "Eutanasia / Drogas ilícitas",
+        "Trabajo infantil / Esclavitud moderna",
+        "Gambling / Juegos de azar",
+    ]
+
+    # ── Prompt builder ────────────────────────────────────────────────────────
+    def _faith_prompt(question: str, ticker: str, name: str, sector: str,
+                      industry: str, index_member: str) -> str:
+        return f"""Eres un analista especializado en inversión ética desde una perspectiva de fe cristiana.
+
+Empresa: {ticker} — {name}
+Sector: {sector} | Industria: {industry} | Índice: {index_member}
+
+CRITERIO A EVALUAR:
+{question}
+
+Definición de PASS: La empresa NO tiene este tipo de negocio ni lo apoya activamente de forma relevante.
+Definición de NO PASS: La empresa SÍ tiene este tipo de negocio como parte relevante de sus operaciones o lo apoya activamente.
+
+Busca información en:
+1. Documentos oficiales de la empresa: 10-K, 10-Q, Annual Report, Investor Presentation, Sustainability Report / ESG Report.
+2. Medios de comunicación de renombre nacional o mundial (Financial Times, Wall Street Journal, Reuters, Bloomberg, NY Times, BBC, The Economist, etc.).
+
+Responde ÚNICAMENTE con el siguiente objeto JSON (sin texto antes ni después):
+{{
+  "resultado": "PASS",
+  "criterio": "Explicación concisa de la evidencia encontrada y por qué lleva a esta conclusión.",
+  "por_que_no_lo_contrario": "Argumento sólido de por qué la respuesta contraria sería incorrecta.",
+  "fuentes": [
+    {{
+      "tipo": "10-K",
+      "nombre": "Nombre exacto del documento o medio",
+      "link": "URL directa si está disponible, si no: 'No disponible'",
+      "resumen": "1-2 oraciones de cómo esta fuente sustenta la decisión."
+    }}
+  ]
+}}
+
+El campo "resultado" debe ser exactamente "PASS" o "NO PASS".
+Incluye entre 2 y 6 fuentes. Prioriza documentos oficiales de la empresa sobre prensa."""
+
+    # ── LLM helpers (reuse Scorecard pattern) ─────────────────────────────────
+    def _faith_call_gemini(api_key: str, model: str, prompt: str) -> str:
+        import google.genai as _genai
+        client = _genai.Client(api_key=api_key)
+        resp = client.models.generate_content(model=model, contents=prompt)
+        return resp.text
+
+    def _faith_call_claude(api_key: str, model: str, prompt: str) -> str:
+        import anthropic as _anthropic
+        client = _anthropic.Anthropic(api_key=api_key)
+        msg = client.messages.create(
+            model=model,
+            max_tokens=2048,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return msg.content[0].text
+
+    def _faith_call_with_retry(fn, status_ph=None, max_retries=4, base_delay=15) -> str:
+        PERMANENT = ["per_day", "perday", "free_tier", "limit: 0",
+                     "GenerateRequestsPerDay", "daily",
+                     "credit balance", "spend limit", "billing"]
+        for attempt in range(max_retries):
+            try:
+                return fn()
+            except Exception as e:
+                err = str(e).lower()
+                is_rate = any(x in err for x in ["429", "529", "resource_exhausted",
+                                                   "too many", "overloaded", "rate_limit"])
+                if not is_rate:
+                    raise
+                if any(x.lower() in err for x in PERMANENT):
+                    raise RuntimeError(f"⛔ Cuota diaria agotada. Espera 24h o cambia modelo.\n{e}")
+                if attempt < max_retries - 1:
+                    wait = base_delay * (2 ** attempt)
+                    for remaining in range(wait, 0, -1):
+                        if status_ph:
+                            status_ph.warning(f"⚠️ Rate limit — esperando {remaining}s…")
+                        _time.sleep(1)
+                    if status_ph:
+                        status_ph.empty()
+                else:
+                    raise
+        raise RuntimeError("Máximo de reintentos alcanzado")
+
+    def _parse_faith_response(raw: str) -> dict:
+        """Extract JSON from LLM response, with fallback."""
+        text = raw.strip()
+        # Strip markdown code fences if present
+        text = _re.sub(r"^```(?:json)?\s*", "", text)
+        text = _re.sub(r"\s*```$", "", text)
+        # Try to extract JSON object
+        m = _re.search(r"\{[\s\S]*\}", text)
+        if m:
+            try:
+                return _json.loads(m.group())
+            except Exception:
+                pass
+        return {
+            "resultado": "NO PARSE",
+            "criterio": raw,
+            "por_que_no_lo_contrario": "",
+            "fuentes": [],
+        }
+
+    # ── Company list ──────────────────────────────────────────────────────────
+    _faith_companies = get_sp500_list()
+
+    st.markdown("## ✝️ Faith Driven Scorecard")
+    st.caption(
+        "Evalúa empresas contra 7 criterios de inversión basada en fe. "
+        "Cada criterio produce **PASS** o **NO PASS** con evidencia y fuentes."
+    )
+
+    if not _faith_companies:
+        st.warning("Lista de empresas no cargada. Ve a la página Scorecard primero para inicializarla.")
+        st.stop()
+
+    # ── Controls ──────────────────────────────────────────────────────────────
+    fc1, fc2, fc3, fc4 = st.columns([2, 1, 1, 1])
+
+    with fc1:
+        _faith_search = st.text_input("Buscar empresa", placeholder="Ticker o nombre…",
+                                       key="faith_search", label_visibility="collapsed")
+    with fc2:
+        _faith_index = st.selectbox("Índice", ["Todos", "SP500", "SP400", "SP600"],
+                                     key="faith_index_filter")
+    with fc3:
+        _faith_sector_opts = ["Todos los sectores"] + sorted(
+            {r["sector"] for r in _faith_companies if r.get("sector")}
+        )
+        _faith_sector = st.selectbox("Sector", _faith_sector_opts,
+                                      key="faith_sector_filter", label_visibility="collapsed")
+    with fc4:
+        _faith_llm = st.selectbox("LLM", ["Gemini", "Claude"], key="faith_llm")
+
+    # Filter company list
+    _faith_rows = _faith_companies
+    if _faith_index != "Todos":
+        _faith_rows = [r for r in _faith_rows if r.get("index_member") == _faith_index]
+    if _faith_sector != "Todos los sectores":
+        _faith_rows = [r for r in _faith_rows if r.get("sector") == _faith_sector]
+    if _faith_search:
+        _s = _faith_search.upper()
+        _faith_rows = [r for r in _faith_rows
+                       if _s in r["ticker"].upper() or _s in (r.get("name") or "").upper()]
+
+    # ── Company table ─────────────────────────────────────────────────────────
+    _faith_all_runs = {r["ticker"]: r for r in get_all_faith_runs()
+                       if r.get("llm", "").lower() == _faith_llm.lower()}
+
+    import pandas as _pd
+    _faith_display = []
+    for r in _faith_rows[:200]:
+        run = _faith_all_runs.get(r["ticker"])
+        overall = run["overall"] if run and run.get("overall") else "—"
+        status  = run["status"]  if run else "—"
+        _faith_display.append({
+            "Ticker":   r["ticker"],
+            "Empresa":  r.get("name", ""),
+            "Sector":   r.get("sector", ""),
+            "Índice":   r.get("index_member", ""),
+            "Resultado": overall,
+            "Estado":   status,
+        })
+    _faith_df = _pd.DataFrame(_faith_display)
+
+    _faith_sel = st.dataframe(
+        _faith_df,
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        column_config={
+            "Resultado": st.column_config.TextColumn(width="small"),
+            "Estado":    st.column_config.TextColumn(width="small"),
+        },
+        height=280,
+        key="faith_table",
+    )
+
+    _faith_selected_idx = (
+        _faith_sel.selection.rows[0]
+        if _faith_sel.selection and _faith_sel.selection.rows
+        else None
+    )
+
+    if _faith_selected_idx is None:
+        st.info("Selecciona una empresa de la tabla para ver o ejecutar su Faith Scorecard.")
+        st.stop()
+
+    _faith_co = _faith_rows[_faith_selected_idx]
+    _faith_ticker = _faith_co["ticker"]
+    _faith_name   = _faith_co.get("name", _faith_ticker)
+
+    st.divider()
+
+    # ── Detail panel ──────────────────────────────────────────────────────────
+    d1, d2 = st.columns([3, 1])
+    with d1:
+        st.markdown(f"### {_faith_ticker} — {_faith_name}")
+        st.caption(
+            f"{_faith_co.get('sector','—')} · {_faith_co.get('industry','—')} · "
+            f"{_faith_co.get('index_member','—')}"
+        )
+    with d2:
+        existing_run = get_faith_run(_faith_ticker, _faith_llm.lower())
+        if existing_run and existing_run.get("overall"):
+            _ov = existing_run["overall"]
+            if _ov == "PASS":
+                st.success(f"✅ {_ov}", icon="✅")
+            else:
+                st.error(f"❌ {_ov}", icon="❌")
+
+    # ── LLM config ────────────────────────────────────────────────────────────
+    with st.expander("⚙️ Configuración LLM", expanded=(existing_run is None)):
+        cfg1, cfg2 = st.columns(2)
+        with cfg1:
+            if _faith_llm == "Gemini":
+                _faith_model = st.selectbox(
+                    "Modelo Gemini",
+                    ["gemini-2.0-flash", "gemini-2.5-flash-preview-05-20",
+                     "gemini-2.5-pro-preview-06-05"],
+                    key="faith_gemini_model",
+                )
+            else:
+                _faith_model = st.selectbox(
+                    "Modelo Claude",
+                    ["claude-sonnet-4-5", "claude-opus-4-5", "claude-haiku-4-5-20251001"],
+                    key="faith_claude_model",
+                )
+        with cfg2:
+            _faith_delay = st.slider("Retardo entre preguntas (s)", 0, 15, 3,
+                                      key="faith_delay")
+        _faith_apikey = st.text_input(
+            f"API Key {'Google AI' if _faith_llm == 'Gemini' else 'Anthropic'}",
+            type="password", key="faith_apikey",
+        )
+
+    run_btn_label = "▶ Ejecutar Faith Scorecard"
+    if existing_run and existing_run.get("status") in ("complete", "partial"):
+        answered = get_answered_faith_ids(existing_run["run_id"])
+        remaining = len(FAITH_QUESTIONS) - len(answered)
+        if remaining > 0:
+            run_btn_label = f"▶ Reanudar ({remaining} preguntas pendientes)"
+        else:
+            run_btn_label = "🔄 Volver a ejecutar"
+
+    _faith_run_btn = st.button(run_btn_label, type="primary", use_container_width=True,
+                                key="faith_run_btn")
+
+    # ── Run logic ─────────────────────────────────────────────────────────────
+    if _faith_run_btn:
+        if not _faith_apikey:
+            st.error("Ingresa tu API key antes de ejecutar.")
+            st.stop()
+
+        # Decide: new run or resume
+        _resume_run = (
+            existing_run
+            and existing_run.get("status") in ("running", "partial")
+            and len(get_answered_faith_ids(existing_run["run_id"])) > 0
+        )
+
+        if _resume_run:
+            _faith_run_id = existing_run["run_id"]
+            _already_answered = get_answered_faith_ids(_faith_run_id)
+        else:
+            _faith_run_id = create_faith_run(_faith_ticker, _faith_llm.lower(), _faith_model)
+            _already_answered = set()
+
+        _call_fn = _faith_call_gemini if _faith_llm == "Gemini" else _faith_call_claude
+
+        _prog = st.progress(0, text="Iniciando…")
+        _status_ph = st.empty()
+
+        try:
+            for qi, (q_text, q_label) in enumerate(zip(FAITH_QUESTIONS, FAITH_LABELS)):
+                if qi in _already_answered:
+                    _prog.progress((qi + 1) / len(FAITH_QUESTIONS),
+                                   text=f"✓ {q_label} (ya respondida)")
+                    continue
+
+                _prog.progress(qi / len(FAITH_QUESTIONS),
+                               text=f"Evaluando: {q_label}…")
+
+                _prompt = _faith_prompt(
+                    q_text, _faith_ticker, _faith_name,
+                    _faith_co.get("sector", ""),
+                    _faith_co.get("industry", ""),
+                    _faith_co.get("index_member", ""),
+                )
+
+                raw = _faith_call_with_retry(
+                    lambda p=_prompt: _call_fn(_faith_apikey, _faith_model, p),
+                    status_ph=_status_ph,
+                )
+
+                parsed = _parse_faith_response(raw)
+                result = parsed.get("resultado", "NO PARSE")
+                if result not in ("PASS", "NO PASS"):
+                    result = "NO PASS"
+
+                save_faith_answer(
+                    run_id=_faith_run_id,
+                    question_id=qi,
+                    question_text=q_text,
+                    result=result,
+                    criteria=parsed.get("criterio", ""),
+                    why_not_opposite=parsed.get("por_que_no_lo_contrario", ""),
+                    sources_json=_json.dumps(parsed.get("fuentes", []), ensure_ascii=False),
+                    raw_answer=raw,
+                    prompt_used=_prompt,
+                )
+
+                if qi < len(FAITH_QUESTIONS) - 1 and _faith_delay > 0:
+                    _time.sleep(_faith_delay)
+
+            # Finalize
+            _all_ans = get_faith_answers(_faith_run_id)
+            _overall = "PASS" if all(a["result"] == "PASS" for a in _all_ans) else "NO PASS"
+            finalize_faith_run(_faith_run_id, _overall)
+            _prog.progress(1.0, text="✅ Completado")
+            _status_ph.empty()
+            st.rerun()
+
+        except Exception as _ex:
+            mark_faith_run_failed(_faith_run_id)
+            _prog.empty()
+            st.error(f"Error durante la ejecución: {_ex}")
+
+    # ── Results display ───────────────────────────────────────────────────────
+    _disp_run = get_faith_run(_faith_ticker, _faith_llm.lower())
+    if _disp_run is None:
+        st.info("Aún no hay resultados para esta empresa. Ejecuta el Faith Scorecard arriba.")
+    else:
+        _answers = get_faith_answers(_disp_run["run_id"])
+        if not _answers:
+            st.info("Ejecución en progreso o sin respuestas guardadas aún.")
+        else:
+            # Overall banner
+            _overall_result = _disp_run.get("overall") or (
+                "PASS" if all(a["result"] == "PASS" for a in _answers) else "NO PASS"
+            )
+            if _overall_result == "PASS":
+                st.success(
+                    f"### ✅ {_faith_ticker} — PASS\n"
+                    "La empresa supera todos los criterios de inversión basada en fe.",
+                    icon="✅",
+                )
+            else:
+                st.error(
+                    f"### ❌ {_faith_ticker} — NO PASS\n"
+                    "La empresa no supera uno o más criterios de inversión basada en fe.",
+                    icon="❌",
+                )
+
+            # Summary grid
+            st.markdown("#### Resumen de criterios")
+            _sum_cols = st.columns(len(_answers) if len(_answers) <= 4 else 4)
+            for i, ans in enumerate(_answers):
+                col = _sum_cols[i % 4]
+                label = FAITH_LABELS[ans["question_id"]] if ans["question_id"] < len(FAITH_LABELS) else f"Q{ans['question_id']+1}"
+                short = label.split("/")[0].strip()
+                with col:
+                    if ans["result"] == "PASS":
+                        st.success(f"✅ {short}", icon="✅")
+                    else:
+                        st.error(f"❌ {short}", icon="❌")
+
+            st.divider()
+
+            # Per-question detail
+            st.markdown("#### Detalle por criterio")
+            for ans in _answers:
+                qi = ans["question_id"]
+                label = FAITH_LABELS[qi] if qi < len(FAITH_LABELS) else f"Criterio {qi+1}"
+                result = ans["result"]
+                icon = "✅" if result == "PASS" else "❌"
+
+                with st.expander(f"{icon} **{label}** — {result}", expanded=(result == "NO PASS")):
+
+                    # Prompt used
+                    with st.expander("📋 Ver prompt enviado", expanded=False):
+                        st.code(ans.get("prompt_used", ""), language=None)
+
+                    # Result chips
+                    r1, r2 = st.columns(2)
+                    with r1:
+                        st.markdown("**Criterio / Evidencia**")
+                        st.markdown(ans.get("criteria", "—"))
+                    with r2:
+                        st.markdown("**¿Por qué no lo contrario?**")
+                        st.markdown(ans.get("why_not_opposite", "—"))
+
+                    # Sources table
+                    _sources_raw = ans.get("sources_json", "[]")
+                    try:
+                        _sources = _json.loads(_sources_raw) if _sources_raw else []
+                    except Exception:
+                        _sources = []
+
+                    if _sources:
+                        st.markdown("**📚 Fuentes consultadas**")
+                        _src_rows = []
+                        for s in _sources:
+                            link = s.get("link", "No disponible")
+                            link_cell = (
+                                f"[{s.get('nombre','Fuente')}]({link})"
+                                if link and link != "No disponible"
+                                else s.get("nombre", "—")
+                            )
+                            _src_rows.append({
+                                "Tipo":    s.get("tipo", "—"),
+                                "Fuente":  link_cell,
+                                "Resumen": s.get("resumen", "—"),
+                            })
+                        _src_df = _pd.DataFrame(_src_rows)
+                        st.dataframe(
+                            _src_df,
+                            use_container_width=True,
+                            hide_index=True,
+                            column_config={
+                                "Fuente": st.column_config.MarkdownColumn("Fuente", width="medium"),
+                                "Resumen": st.column_config.TextColumn("Resumen", width="large"),
+                            },
+                        )
+                    else:
+                        st.caption("Sin fuentes registradas.")
+
+            # Export
+            st.divider()
+            _exp_rows = []
+            for ans in _answers:
+                qi = ans["question_id"]
+                label = FAITH_LABELS[qi] if qi < len(FAITH_LABELS) else f"Criterio {qi+1}"
+                try:
+                    srcs = _json.loads(ans.get("sources_json", "[]") or "[]")
+                except Exception:
+                    srcs = []
+                srcs_text = " | ".join(
+                    f"{s.get('tipo','')}: {s.get('nombre','')} — {s.get('resumen','')}"
+                    for s in srcs
+                )
+                _exp_rows.append({
+                    "Ticker":       _faith_ticker,
+                    "Empresa":      _faith_name,
+                    "Criterio":     label,
+                    "Pregunta":     ans.get("question_text", ""),
+                    "Resultado":    ans.get("result", ""),
+                    "Evidencia":    ans.get("criteria", ""),
+                    "Por qué no lo contrario": ans.get("why_not_opposite", ""),
+                    "Fuentes":      srcs_text,
+                })
+            _exp_df = _pd.DataFrame(_exp_rows)
+            st.download_button(
+                "⬇️ Exportar como CSV",
+                data=_exp_df.to_csv(index=False).encode("utf-8"),
+                file_name=f"faith_scorecard_{_faith_ticker}.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  PAGE: HELP / DOCUMENTATION
