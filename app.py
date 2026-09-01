@@ -5215,18 +5215,30 @@ Incluye entre 2 y 6 fuentes. Prioriza documentos oficiales de la empresa sobre p
                        if r.get("llm", "").lower() == _faith_llm.lower()}
 
     import pandas as _pd
+
+    def _fmt_mcap(v):
+        try:
+            v = float(v)
+            if v >= 1e12: return f"${v/1e12:.1f}T"
+            if v >= 1e9:  return f"${v/1e9:.1f}B"
+            if v >= 1e6:  return f"${v/1e6:.0f}M"
+            return f"${v:,.0f}"
+        except Exception:
+            return "—"
+
     _faith_display = []
     for r in _faith_rows[:200]:
         run = _faith_all_runs.get(r["ticker"])
         overall = run["overall"] if run and run.get("overall") else "—"
         status  = run["status"]  if run else "—"
         _faith_display.append({
-            "Ticker":   r["ticker"],
-            "Empresa":  r.get("name", ""),
-            "Sector":   r.get("sector", ""),
-            "Índice":   r.get("index_member", ""),
+            "Ticker":    r["ticker"],
+            "Empresa":   r.get("name", ""),
+            "Índice":    r.get("index_member") or "SP500",
+            "Mkt Cap":   _fmt_mcap(r.get("market_cap")),
+            "Sector":    r.get("sector", ""),
             "Resultado": overall,
-            "Estado":   status,
+            "Estado":    status,
         })
     _faith_df = _pd.DataFrame(_faith_display)
 
@@ -5237,6 +5249,8 @@ Incluye entre 2 y 6 fuentes. Prioriza documentos oficiales de la empresa sobre p
         on_select="rerun",
         selection_mode="multi-row",
         column_config={
+            "Índice":    st.column_config.TextColumn(width="small"),
+            "Mkt Cap":   st.column_config.TextColumn(width="small"),
             "Resultado": st.column_config.TextColumn(width="small"),
             "Estado":    st.column_config.TextColumn(width="small"),
         },
