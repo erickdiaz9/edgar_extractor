@@ -4268,6 +4268,15 @@ elif page == "🎯  Scorecard":
         except Exception:
             return None
 
+    def _normalize_company_name(s: str) -> str:
+        """Fix source typos like 'STarbucks' → 'Starbucks' (exactly-two-leading-caps pattern)."""
+        import re as _re_n
+        return _re_n.sub(
+            r'\b([A-Z]{2})([a-z]{3,})\b',
+            lambda m: m.group(1)[0] + m.group(1)[1].lower() + m.group(2),
+            s,
+        )
+
     @st.cache_data(ttl=3600, show_spinner=False)
     def _fetch_company_list() -> list[dict]:
         """Fetch company list + prices from Google Sheets (cached 1 h).
@@ -4285,7 +4294,7 @@ elif page == "🎯  Scorecard":
                     continue
                 rows.append({
                     "ticker":       ticker,
-                    "name":         str(r.get("company", "")).strip(),
+                    "name":         _normalize_company_name(str(r.get("company", "")).strip()),
                     "sector":       str(r.get("GICS_Sector", "")).strip(),
                     "industry":     str(r.get("GICS_Sub-Industry", "")).strip(),
                     "index_member": _INDEX_MAP.get(str(r.get("index", "")).strip(), "SP500"),
@@ -4313,7 +4322,7 @@ elif page == "🎯  Scorecard":
                     continue
                 rows.append({
                     "ticker":       ticker,
-                    "name":         str(r.get("name", r.get("company", ""))).strip(),
+                    "name":         _normalize_company_name(str(r.get("name", r.get("company", ""))).strip()),
                     "sector":       str(r.get("sector", r.get("GICS_Sector", ""))).strip(),
                     "industry":     str(r.get("industry", r.get("GICS_Sub-Industry", ""))).strip(),
                     "index_member": str(r.get("index_member", "SP500")).strip(),
@@ -5038,7 +5047,7 @@ elif page == "✝️  Faith Scorecard":
         create_faith_run, save_faith_answer, finalize_faith_run,
         mark_faith_run_failed, get_all_faith_runs, get_faith_run,
         get_faith_answers, get_answered_faith_ids,
-        gcs_download, upsert_kpis,
+        gcs_download, upsert_kpis, upsert_sp500_companies,
     )
 
     if not st.session_state.get("_faith_gcs_loaded"):
@@ -5078,7 +5087,8 @@ elif page == "✝️  Faith Scorecard":
                         "pe_ratio":   _to_float_f(row.get("pe", row.get("pe_ratio"))),
                     })
             if _kpi_seed:
-                upsert_kpis(_kpi_seed, upload=False)
+                # Upload to GCS only when we got a full dataset (protects against partial/failed fetches)
+                upsert_kpis(_kpi_seed, upload=len(_kpi_seed) > 100)
         except Exception:
             pass
         st.session_state["_faith_kpi_seeded"] = True
@@ -5218,7 +5228,7 @@ Incluye entre 2 y 6 fuentes. Prioriza documentos oficiales de la empresa sobre p
         st.stop()
 
     # ── Controls ──────────────────────────────────────────────────────────────
-    fc1, fc2, fc3, fc4 = st.columns([2, 1, 1, 1])
+    fc1, fc2, fc3, fc4, fc5 = st.columns([2, 1, 1, 1, 1])
 
     with fc1:
         _faith_search = st.text_input("Buscar empresa", placeholder="Ticker o nombre…",
@@ -5234,6 +5244,13 @@ Incluye entre 2 y 6 fuentes. Prioriza documentos oficiales de la empresa sobre p
                                       key="faith_sector_filter", label_visibility="collapsed")
     with fc4:
         _faith_llm = st.selectbox("LLM", ["Gemini", "Claude"], key="faith_llm")
+    with fc5:
+        _faith_refresh = st.button("🔄 Actualizar", use_container_width=True, key="faith_refresh_kpi")
+
+    # ── KPI / company list refresh ────────────────────────────────────────────
+    if _faith_refresh:
+        st.session_state["_faith_kpi_seeded"] = False   # force re-seed next rerun
+        st.rerun()
 
     # Filter company list
     _faith_rows = _faith_companies
