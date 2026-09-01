@@ -5038,7 +5038,7 @@ elif page == "✝️  Faith Scorecard":
         create_faith_run, save_faith_answer, finalize_faith_run,
         mark_faith_run_failed, get_all_faith_runs, get_faith_run,
         get_faith_answers, get_answered_faith_ids,
-        gcs_download,
+        gcs_download, upsert_kpis,
     )
 
     if not st.session_state.get("_faith_gcs_loaded"):
@@ -5046,6 +5046,42 @@ elif page == "✝️  Faith Scorecard":
         st.session_state["_faith_gcs_loaded"] = True
 
     init_db()
+
+    # ── Seed prices if market_cap is missing (user navigated here without visiting Scorecard) ──
+    if not st.session_state.get("_faith_kpi_seeded"):
+        try:
+            import io as _io, requests as _req_f
+            _GSHEET_URL_F = (
+                "https://docs.google.com/spreadsheets/d/e/"
+                "2PACX-1vTiCPfb9O_EpBlfLD9f5sutYQSZtCBI48YVTspTufa-12_2CKE1XfEHy4DB1HL-CP40H5kFTbDANELv"
+                "/pub?output=csv"
+            )
+            def _to_float_f(v):
+                try:
+                    f = float(v)
+                    return None if f != f else f
+                except Exception:
+                    return None
+
+            _resp_f = _req_f.get(_GSHEET_URL_F, timeout=15, allow_redirects=True)
+            import pandas as _pd_f
+            _df_f = _pd_f.read_csv(_io.StringIO(_resp_f.text))
+            _df_f.columns = [c.strip() for c in _df_f.columns]
+            _kpi_seed = []
+            for _, row in _df_f.iterrows():
+                tk = str(row.get("ticker", "")).strip().upper()
+                if tk:
+                    _kpi_seed.append({
+                        "ticker":     tk,
+                        "last_price": _to_float_f(row.get("price", row.get("last_price"))),
+                        "market_cap": _to_float_f(row.get("marketcap", row.get("market_cap"))),
+                        "pe_ratio":   _to_float_f(row.get("pe", row.get("pe_ratio"))),
+                    })
+            if _kpi_seed:
+                upsert_kpis(_kpi_seed, upload=False)
+        except Exception:
+            pass
+        st.session_state["_faith_kpi_seeded"] = True
 
     # ── 7 Faith questions ─────────────────────────────────────────────────────
     FAITH_QUESTIONS = [
