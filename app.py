@@ -5238,7 +5238,7 @@ Incluye entre 2 y 6 fuentes. Prioriza documentos oficiales de la empresa sobre p
     # Filter company list
     _faith_rows = _faith_companies
     if _faith_index != "Todos":
-        _faith_rows = [r for r in _faith_rows if r.get("index_member") == _faith_index]
+        _faith_rows = [r for r in _faith_rows if (r.get("index_member") or "SP500") == _faith_index]
     if _faith_sector != "Todos los sectores":
         _faith_rows = [r for r in _faith_rows if r.get("sector") == _faith_sector]
     if _faith_search:
@@ -5252,18 +5252,15 @@ Incluye entre 2 y 6 fuentes. Prioriza documentos oficiales de la empresa sobre p
 
     import pandas as _pd
 
-    def _fmt_mcap(v):
+    def _to_mcap_billions(v):
         try:
-            v = float(v)
-            if v >= 1e12: return f"${v/1e12:.1f}T"
-            if v >= 1e9:  return f"${v/1e9:.1f}B"
-            if v >= 1e6:  return f"${v/1e6:.0f}M"
-            return f"${v:,.0f}"
+            f = float(v)
+            return round(f / 1e9, 2) if f and f == f else None
         except Exception:
-            return "—"
+            return None
 
     _faith_display = []
-    for r in _faith_rows[:200]:
+    for r in _faith_rows:
         run = _faith_all_runs.get(r["ticker"])
         overall = run["overall"] if run and run.get("overall") else "—"
         status  = run["status"]  if run else "—"
@@ -5271,7 +5268,7 @@ Incluye entre 2 y 6 fuentes. Prioriza documentos oficiales de la empresa sobre p
             "Ticker":    r["ticker"],
             "Empresa":   r.get("name", ""),
             "Índice":    r.get("index_member") or "SP500",
-            "Mkt Cap":   _fmt_mcap(r.get("market_cap")),
+            "Mkt Cap $B": _to_mcap_billions(r.get("market_cap")),
             "Sector":    r.get("sector", ""),
             "Resultado": overall,
             "Estado":    status,
@@ -5285,12 +5282,13 @@ Incluye entre 2 y 6 fuentes. Prioriza documentos oficiales de la empresa sobre p
         on_select="rerun",
         selection_mode="multi-row",
         column_config={
-            "Índice":    st.column_config.TextColumn(width="small"),
-            "Mkt Cap":   st.column_config.TextColumn(width="small"),
-            "Resultado": st.column_config.TextColumn(width="small"),
-            "Estado":    st.column_config.TextColumn(width="small"),
+            "Índice":     st.column_config.TextColumn(width="small"),
+            "Mkt Cap $B": st.column_config.NumberColumn(
+                            "Mkt Cap $B", format="$%.1f B", width="small"),
+            "Resultado":  st.column_config.TextColumn(width="small"),
+            "Estado":     st.column_config.TextColumn(width="small"),
         },
-        height=300,
+        height=400,
         key="faith_table",
     )
 
