@@ -5235,50 +5235,38 @@ Incluye entre 2 y 6 fuentes. Prioriza documentos oficiales de la empresa sobre p
         use_container_width=True,
         hide_index=True,
         on_select="rerun",
-        selection_mode="single-row",
+        selection_mode="multi-row",
         column_config={
             "Resultado": st.column_config.TextColumn(width="small"),
             "Estado":    st.column_config.TextColumn(width="small"),
         },
-        height=280,
+        height=300,
         key="faith_table",
     )
 
-    _faith_selected_idx = (
-        _faith_sel.selection.rows[0]
+    _faith_selected_idxs = (
+        _faith_sel.selection.rows
         if _faith_sel.selection and _faith_sel.selection.rows
-        else None
+        else []
     )
 
-    if _faith_selected_idx is None:
-        st.info("Selecciona una empresa de la tabla para ver o ejecutar su Faith Scorecard.")
+    # Cap at 10
+    MAX_BATCH = 10
+    if len(_faith_selected_idxs) > MAX_BATCH:
+        st.warning(f"Máximo {MAX_BATCH} empresas por lote. Se usarán las primeras {MAX_BATCH}.")
+        _faith_selected_idxs = _faith_selected_idxs[:MAX_BATCH]
+
+    if not _faith_selected_idxs:
+        st.info("Selecciona una o varias empresas (máx. 10) para ver o ejecutar el Faith Scorecard.")
         st.stop()
 
-    _faith_co = _faith_rows[_faith_selected_idx]
-    _faith_ticker = _faith_co["ticker"]
-    _faith_name   = _faith_co.get("name", _faith_ticker)
+    _faith_selected_cos = [_faith_rows[i] for i in _faith_selected_idxs]
+    _is_batch = len(_faith_selected_cos) > 1
 
     st.divider()
 
-    # ── Detail panel ──────────────────────────────────────────────────────────
-    d1, d2 = st.columns([3, 1])
-    with d1:
-        st.markdown(f"### {_faith_ticker} — {_faith_name}")
-        st.caption(
-            f"{_faith_co.get('sector','—')} · {_faith_co.get('industry','—')} · "
-            f"{_faith_co.get('index_member','—')}"
-        )
-    with d2:
-        existing_run = get_faith_run(_faith_ticker, _faith_llm.lower())
-        if existing_run and existing_run.get("overall"):
-            _ov = existing_run["overall"]
-            if _ov == "PASS":
-                st.success(f"✅ {_ov}", icon="✅")
-            else:
-                st.error(f"❌ {_ov}", icon="❌")
-
-    # ── LLM config ────────────────────────────────────────────────────────────
-    with st.expander("⚙️ Configuración LLM", expanded=(existing_run is None)):
+    # ── LLM config (shared for all modes) ────────────────────────────────────
+    with st.expander("⚙️ Configuración LLM", expanded=True):
         cfg1, cfg2 = st.columns(2)
         with cfg1:
             if _faith_llm == "Gemini":
@@ -5301,229 +5289,364 @@ Incluye entre 2 y 6 fuentes. Prioriza documentos oficiales de la empresa sobre p
             type="password", key="faith_apikey",
         )
 
-    run_btn_label = "▶ Ejecutar Faith Scorecard"
-    if existing_run and existing_run.get("status") in ("complete", "partial"):
-        answered = get_answered_faith_ids(existing_run["run_id"])
-        remaining = len(FAITH_QUESTIONS) - len(answered)
-        if remaining > 0:
-            run_btn_label = f"▶ Reanudar ({remaining} preguntas pendientes)"
+    # ── Helper: run one company ───────────────────────────────────────────────
+    def _run_one_company(co: dict, call_fn, prog_prefix: str,
+                         outer_prog, status_ph, faith_delay: int,
+                         faith_model: str, faith_apikey: str,
+                         faith_llm_key: str):
+        ticker = co["ticker"]
+        name   = co.get("name", ticker)
+        ex_run = get_faith_run(ticker, faith_llm_key)
+        resume = (
+            ex_run
+            and ex_run.get("status") in ("running", "partial")
+            and len(get_answered_faith_ids(ex_run["run_id"])) > 0
+        )
+        if resume:
+            run_id   = ex_run["run_id"]
+            answered = get_answered_faith_ids(run_id)
         else:
-            run_btn_label = "🔄 Volver a ejecutar"
+            run_id   = create_faith_run(ticker, faith_llm_key, faith_model)
+            answered = set()
 
-    _faith_run_btn = st.button(run_btn_label, type="primary", use_container_width=True,
-                                key="faith_run_btn")
+        n_q = len(FAITH_QUESTIONS)
+        for qi, (q_text, q_label) in enumerate(zip(FAITH_QUESTIONS, FAITH_LABELS)):
+            if qi in answered:
+                continue
+            if outer_prog:
+                outer_prog(text=f"{prog_prefix} · {q_label}…")
+            _prompt = _faith_prompt(
+                q_text, ticker, name,
+                co.get("sector", ""), co.get("industry", ""),
+                co.get("index_member", ""),
+            )
+            raw = _faith_call_with_retry(
+                lambda p=_prompt: call_fn(faith_apikey, faith_model, p),
+                status_ph=status_ph,
+            )
+            parsed = _parse_faith_response(raw)
+            result = parsed.get("resultado", "NO PARSE")
+            if result not in ("PASS", "NO PASS"):
+                result = "NO PASS"
+            save_faith_answer(
+                run_id=run_id,
+                question_id=qi,
+                question_text=q_text,
+                result=result,
+                criteria=parsed.get("criterio", ""),
+                why_not_opposite=parsed.get("por_que_no_lo_contrario", ""),
+                sources_json=_json.dumps(parsed.get("fuentes", []), ensure_ascii=False),
+                raw_answer=raw,
+                prompt_used=_prompt,
+            )
+            if qi < n_q - 1 and faith_delay > 0:
+                _time.sleep(faith_delay)
 
-    # ── Run logic ─────────────────────────────────────────────────────────────
-    if _faith_run_btn:
-        if not _faith_apikey:
-            st.error("Ingresa tu API key antes de ejecutar.")
-            st.stop()
+        all_ans  = get_faith_answers(run_id)
+        overall  = "PASS" if all(a["result"] == "PASS" for a in all_ans) else "NO PASS"
+        finalize_faith_run(run_id, overall)
+        return overall
 
-        # Decide: new run or resume
-        _resume_run = (
-            existing_run
-            and existing_run.get("status") in ("running", "partial")
-            and len(get_answered_faith_ids(existing_run["run_id"])) > 0
+    # ══════════════════════════════════════════════════════════════════════════
+    # BATCH MODE  (multiple companies selected)
+    # ══════════════════════════════════════════════════════════════════════════
+    if _is_batch:
+        st.markdown(f"### Lote de {len(_faith_selected_cos)} empresa(s) seleccionada(s)")
+
+        # Preview list
+        _batch_summary_rows = []
+        for co in _faith_selected_cos:
+            ex = get_faith_run(co["ticker"], _faith_llm.lower())
+            overall = ex["overall"] if ex and ex.get("overall") else "—"
+            _batch_summary_rows.append({
+                "Ticker":    co["ticker"],
+                "Empresa":   co.get("name", ""),
+                "Resultado": overall,
+            })
+        st.dataframe(_pd.DataFrame(_batch_summary_rows), use_container_width=True,
+                     hide_index=True, height=200)
+
+        _batch_btn = st.button(
+            f"▶ Ejecutar Faith Scorecard para {len(_faith_selected_cos)} empresas",
+            type="primary", use_container_width=True, key="faith_batch_btn",
         )
 
-        if _resume_run:
-            _faith_run_id = existing_run["run_id"]
-            _already_answered = get_answered_faith_ids(_faith_run_id)
-        else:
-            _faith_run_id = create_faith_run(_faith_ticker, _faith_llm.lower(), _faith_model)
-            _already_answered = set()
+        if _batch_btn:
+            if not _faith_apikey:
+                st.error("Ingresa tu API key antes de ejecutar.")
+                st.stop()
 
-        _call_fn = _faith_call_gemini if _faith_llm == "Gemini" else _faith_call_claude
+            _call_fn = _faith_call_gemini if _faith_llm == "Gemini" else _faith_call_claude
+            _total   = len(_faith_selected_cos)
+            _prog    = st.progress(0, text="Iniciando lote…")
+            _status  = st.empty()
 
-        _prog = st.progress(0, text="Iniciando…")
-        _status_ph = st.empty()
+            try:
+                for ci, co in enumerate(_faith_selected_cos):
+                    ticker = co["ticker"]
+                    prefix = f"Empresa {ci+1}/{_total}: {ticker}"
+                    _prog.progress(ci / _total, text=f"{prefix}…")
 
-        try:
-            for qi, (q_text, q_label) in enumerate(zip(FAITH_QUESTIONS, FAITH_LABELS)):
-                if qi in _already_answered:
-                    _prog.progress((qi + 1) / len(FAITH_QUESTIONS),
-                                   text=f"✓ {q_label} (ya respondida)")
+                    def _upd(text=""):
+                        _prog.progress(ci / _total, text=text)
+
+                    _run_one_company(
+                        co, _call_fn, prefix, _upd, _status,
+                        _faith_delay, _faith_model, _faith_apikey,
+                        _faith_llm.lower(),
+                    )
+
+                _prog.progress(1.0, text=f"✅ Lote completado — {_total} empresa(s)")
+                _status.empty()
+                st.rerun()
+
+            except Exception as _ex:
+                _prog.empty()
+                st.error(f"Error durante la ejecución del lote: {_ex}")
+
+        # After batch — show full summary table
+        st.divider()
+        st.markdown("#### Resultados del lote")
+        _batch_res_rows = []
+        for co in _faith_selected_cos:
+            ex = get_faith_run(co["ticker"], _faith_llm.lower())
+            if not ex:
+                continue
+            ans_list = get_faith_answers(ex["run_id"])
+            ans_map  = {a["question_id"]: a["result"] for a in ans_list}
+            row = {
+                "Ticker":  co["ticker"],
+                "Empresa": co.get("name", ""),
+                "Overall": ex.get("overall") or "—",
+            }
+            for qi, lbl in enumerate(FAITH_LABELS):
+                short = lbl.split("/")[0].strip()
+                row[short] = ans_map.get(qi, "—")
+            _batch_res_rows.append(row)
+
+        if _batch_res_rows:
+            _batch_res_df = _pd.DataFrame(_batch_res_rows)
+            st.dataframe(_batch_res_df, use_container_width=True, hide_index=True)
+
+            # Batch CSV export
+            _batch_exp_rows = []
+            for co in _faith_selected_cos:
+                ex = get_faith_run(co["ticker"], _faith_llm.lower())
+                if not ex:
                     continue
-
-                _prog.progress(qi / len(FAITH_QUESTIONS),
-                               text=f"Evaluando: {q_label}…")
-
-                _prompt = _faith_prompt(
-                    q_text, _faith_ticker, _faith_name,
-                    _faith_co.get("sector", ""),
-                    _faith_co.get("industry", ""),
-                    _faith_co.get("index_member", ""),
-                )
-
-                raw = _faith_call_with_retry(
-                    lambda p=_prompt: _call_fn(_faith_apikey, _faith_model, p),
-                    status_ph=_status_ph,
-                )
-
-                parsed = _parse_faith_response(raw)
-                result = parsed.get("resultado", "NO PARSE")
-                if result not in ("PASS", "NO PASS"):
-                    result = "NO PASS"
-
-                save_faith_answer(
-                    run_id=_faith_run_id,
-                    question_id=qi,
-                    question_text=q_text,
-                    result=result,
-                    criteria=parsed.get("criterio", ""),
-                    why_not_opposite=parsed.get("por_que_no_lo_contrario", ""),
-                    sources_json=_json.dumps(parsed.get("fuentes", []), ensure_ascii=False),
-                    raw_answer=raw,
-                    prompt_used=_prompt,
-                )
-
-                if qi < len(FAITH_QUESTIONS) - 1 and _faith_delay > 0:
-                    _time.sleep(_faith_delay)
-
-            # Finalize
-            _all_ans = get_faith_answers(_faith_run_id)
-            _overall = "PASS" if all(a["result"] == "PASS" for a in _all_ans) else "NO PASS"
-            finalize_faith_run(_faith_run_id, _overall)
-            _prog.progress(1.0, text="✅ Completado")
-            _status_ph.empty()
-            st.rerun()
-
-        except Exception as _ex:
-            mark_faith_run_failed(_faith_run_id)
-            _prog.empty()
-            st.error(f"Error durante la ejecución: {_ex}")
-
-    # ── Results display ───────────────────────────────────────────────────────
-    _disp_run = get_faith_run(_faith_ticker, _faith_llm.lower())
-    if _disp_run is None:
-        st.info("Aún no hay resultados para esta empresa. Ejecuta el Faith Scorecard arriba.")
-    else:
-        _answers = get_faith_answers(_disp_run["run_id"])
-        if not _answers:
-            st.info("Ejecución en progreso o sin respuestas guardadas aún.")
-        else:
-            # Overall banner
-            _overall_result = _disp_run.get("overall") or (
-                "PASS" if all(a["result"] == "PASS" for a in _answers) else "NO PASS"
-            )
-            if _overall_result == "PASS":
-                st.success(
-                    f"### ✅ {_faith_ticker} — PASS\n"
-                    "La empresa supera todos los criterios de inversión basada en fe.",
-                    icon="✅",
-                )
-            else:
-                st.error(
-                    f"### ❌ {_faith_ticker} — NO PASS\n"
-                    "La empresa no supera uno o más criterios de inversión basada en fe.",
-                    icon="❌",
-                )
-
-            # Summary grid
-            st.markdown("#### Resumen de criterios")
-            _sum_cols = st.columns(len(_answers) if len(_answers) <= 4 else 4)
-            for i, ans in enumerate(_answers):
-                col = _sum_cols[i % 4]
-                label = FAITH_LABELS[ans["question_id"]] if ans["question_id"] < len(FAITH_LABELS) else f"Q{ans['question_id']+1}"
-                short = label.split("/")[0].strip()
-                with col:
-                    if ans["result"] == "PASS":
-                        st.success(f"✅ {short}", icon="✅")
-                    else:
-                        st.error(f"❌ {short}", icon="❌")
-
-            st.divider()
-
-            # Per-question detail
-            st.markdown("#### Detalle por criterio")
-            for ans in _answers:
-                qi = ans["question_id"]
-                label = FAITH_LABELS[qi] if qi < len(FAITH_LABELS) else f"Criterio {qi+1}"
-                result = ans["result"]
-                icon = "✅" if result == "PASS" else "❌"
-
-                with st.expander(f"{icon} **{label}** — {result}", expanded=(result == "NO PASS")):
-
-                    # Prompt used
-                    with st.expander("📋 Ver prompt enviado", expanded=False):
-                        st.code(ans.get("prompt_used", ""), language=None)
-
-                    # Result chips
-                    r1, r2 = st.columns(2)
-                    with r1:
-                        st.markdown("**Criterio / Evidencia**")
-                        st.markdown(ans.get("criteria", "—"))
-                    with r2:
-                        st.markdown("**¿Por qué no lo contrario?**")
-                        st.markdown(ans.get("why_not_opposite", "—"))
-
-                    # Sources table
-                    _sources_raw = ans.get("sources_json", "[]")
+                for ans in get_faith_answers(ex["run_id"]):
+                    qi = ans["question_id"]
+                    lbl = FAITH_LABELS[qi] if qi < len(FAITH_LABELS) else f"Criterio {qi+1}"
                     try:
-                        _sources = _json.loads(_sources_raw) if _sources_raw else []
+                        srcs = _json.loads(ans.get("sources_json", "[]") or "[]")
                     except Exception:
-                        _sources = []
-
-                    if _sources:
-                        st.markdown("**📚 Fuentes consultadas**")
-                        _src_rows = []
-                        for s in _sources:
-                            link = s.get("link", "No disponible")
-                            link_cell = (
-                                f"[{s.get('nombre','Fuente')}]({link})"
-                                if link and link != "No disponible"
-                                else s.get("nombre", "—")
-                            )
-                            _src_rows.append({
-                                "Tipo":    s.get("tipo", "—"),
-                                "Fuente":  link_cell,
-                                "Resumen": s.get("resumen", "—"),
-                            })
-                        _src_df = _pd.DataFrame(_src_rows)
-                        st.dataframe(
-                            _src_df,
-                            use_container_width=True,
-                            hide_index=True,
-                            column_config={
-                                "Fuente": st.column_config.MarkdownColumn("Fuente", width="medium"),
-                                "Resumen": st.column_config.TextColumn("Resumen", width="large"),
-                            },
-                        )
-                    else:
-                        st.caption("Sin fuentes registradas.")
-
-            # Export
-            st.divider()
-            _exp_rows = []
-            for ans in _answers:
-                qi = ans["question_id"]
-                label = FAITH_LABELS[qi] if qi < len(FAITH_LABELS) else f"Criterio {qi+1}"
-                try:
-                    srcs = _json.loads(ans.get("sources_json", "[]") or "[]")
-                except Exception:
-                    srcs = []
-                srcs_text = " | ".join(
-                    f"{s.get('tipo','')}: {s.get('nombre','')} — {s.get('resumen','')}"
-                    for s in srcs
+                        srcs = []
+                    srcs_text = " | ".join(
+                        f"{s.get('tipo','')}: {s.get('nombre','')} — {s.get('resumen','')}"
+                        for s in srcs
+                    )
+                    _batch_exp_rows.append({
+                        "Ticker": co["ticker"], "Empresa": co.get("name", ""),
+                        "Criterio": lbl, "Pregunta": ans.get("question_text", ""),
+                        "Resultado": ans.get("result", ""),
+                        "Evidencia": ans.get("criteria", ""),
+                        "Por qué no lo contrario": ans.get("why_not_opposite", ""),
+                        "Fuentes": srcs_text,
+                    })
+            if _batch_exp_rows:
+                st.download_button(
+                    "⬇️ Exportar lote como CSV",
+                    data=_pd.DataFrame(_batch_exp_rows).to_csv(index=False).encode("utf-8"),
+                    file_name="faith_scorecard_lote.csv",
+                    mime="text/csv",
+                    use_container_width=True,
                 )
-                _exp_rows.append({
-                    "Ticker":       _faith_ticker,
-                    "Empresa":      _faith_name,
-                    "Criterio":     label,
-                    "Pregunta":     ans.get("question_text", ""),
-                    "Resultado":    ans.get("result", ""),
-                    "Evidencia":    ans.get("criteria", ""),
-                    "Por qué no lo contrario": ans.get("why_not_opposite", ""),
-                    "Fuentes":      srcs_text,
-                })
-            _exp_df = _pd.DataFrame(_exp_rows)
-            st.download_button(
-                "⬇️ Exportar como CSV",
-                data=_exp_df.to_csv(index=False).encode("utf-8"),
-                file_name=f"faith_scorecard_{_faith_ticker}.csv",
-                mime="text/csv",
-                use_container_width=True,
+        else:
+            st.info("Ejecuta el lote para ver los resultados aquí.")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # SINGLE COMPANY MODE
+    # ══════════════════════════════════════════════════════════════════════════
+    else:
+        _faith_co     = _faith_selected_cos[0]
+        _faith_ticker = _faith_co["ticker"]
+        _faith_name   = _faith_co.get("name", _faith_ticker)
+
+        # Header
+        d1, d2 = st.columns([3, 1])
+        with d1:
+            st.markdown(f"### {_faith_ticker} — {_faith_name}")
+            st.caption(
+                f"{_faith_co.get('sector','—')} · {_faith_co.get('industry','—')} · "
+                f"{_faith_co.get('index_member','—')}"
             )
+        with d2:
+            existing_run = get_faith_run(_faith_ticker, _faith_llm.lower())
+            if existing_run and existing_run.get("overall"):
+                _ov = existing_run["overall"]
+                if _ov == "PASS":
+                    st.success(f"✅ {_ov}", icon="✅")
+                else:
+                    st.error(f"❌ {_ov}", icon="❌")
+
+        run_btn_label = "▶ Ejecutar Faith Scorecard"
+        existing_run  = get_faith_run(_faith_ticker, _faith_llm.lower())
+        if existing_run and existing_run.get("status") in ("complete", "partial"):
+            answered  = get_answered_faith_ids(existing_run["run_id"])
+            remaining = len(FAITH_QUESTIONS) - len(answered)
+            if remaining > 0:
+                run_btn_label = f"▶ Reanudar ({remaining} preguntas pendientes)"
+            else:
+                run_btn_label = "🔄 Volver a ejecutar"
+
+        _faith_run_btn = st.button(run_btn_label, type="primary",
+                                    use_container_width=True, key="faith_run_btn")
+
+        if _faith_run_btn:
+            if not _faith_apikey:
+                st.error("Ingresa tu API key antes de ejecutar.")
+                st.stop()
+            _call_fn = _faith_call_gemini if _faith_llm == "Gemini" else _faith_call_claude
+            _prog    = st.progress(0, text="Iniciando…")
+            _status  = st.empty()
+            try:
+                def _upd_single(text=""):
+                    pass  # progress updated inside _run_one_company via status_ph
+
+                _run_one_company(
+                    _faith_co, _call_fn,
+                    _faith_ticker, None, _status,
+                    _faith_delay, _faith_model, _faith_apikey,
+                    _faith_llm.lower(),
+                )
+                _prog.progress(1.0, text="✅ Completado")
+                _status.empty()
+                st.rerun()
+            except Exception as _ex:
+                mark_faith_run_failed(
+                    get_faith_run(_faith_ticker, _faith_llm.lower())["run_id"]
+                )
+                _prog.empty()
+                st.error(f"Error durante la ejecución: {_ex}")
+
+        # Results
+        _disp_run = get_faith_run(_faith_ticker, _faith_llm.lower())
+        if _disp_run is None:
+            st.info("Aún no hay resultados para esta empresa. Ejecuta el Faith Scorecard arriba.")
+        else:
+            _answers = get_faith_answers(_disp_run["run_id"])
+            if not _answers:
+                st.info("Ejecución en progreso o sin respuestas guardadas aún.")
+            else:
+                _overall_result = _disp_run.get("overall") or (
+                    "PASS" if all(a["result"] == "PASS" for a in _answers) else "NO PASS"
+                )
+                if _overall_result == "PASS":
+                    st.success(
+                        f"### ✅ {_faith_ticker} — PASS\n"
+                        "La empresa supera todos los criterios de inversión basada en fe.",
+                        icon="✅",
+                    )
+                else:
+                    st.error(
+                        f"### ❌ {_faith_ticker} — NO PASS\n"
+                        "La empresa no supera uno o más criterios de inversión basada en fe.",
+                        icon="❌",
+                    )
+
+                st.markdown("#### Resumen de criterios")
+                _sum_cols = st.columns(4)
+                for i, ans in enumerate(_answers):
+                    col   = _sum_cols[i % 4]
+                    label = FAITH_LABELS[ans["question_id"]] if ans["question_id"] < len(FAITH_LABELS) else f"Q{ans['question_id']+1}"
+                    short = label.split("/")[0].strip()
+                    with col:
+                        if ans["result"] == "PASS":
+                            st.success(f"✅ {short}", icon="✅")
+                        else:
+                            st.error(f"❌ {short}", icon="❌")
+
+                st.divider()
+                st.markdown("#### Detalle por criterio")
+                for ans in _answers:
+                    qi     = ans["question_id"]
+                    label  = FAITH_LABELS[qi] if qi < len(FAITH_LABELS) else f"Criterio {qi+1}"
+                    result = ans["result"]
+                    icon   = "✅" if result == "PASS" else "❌"
+
+                    with st.expander(f"{icon} **{label}** — {result}",
+                                     expanded=(result == "NO PASS")):
+                        with st.expander("📋 Ver prompt enviado", expanded=False):
+                            st.code(ans.get("prompt_used", ""), language=None)
+
+                        r1, r2 = st.columns(2)
+                        with r1:
+                            st.markdown("**Criterio / Evidencia**")
+                            st.markdown(ans.get("criteria", "—"))
+                        with r2:
+                            st.markdown("**¿Por qué no lo contrario?**")
+                            st.markdown(ans.get("why_not_opposite", "—"))
+
+                        _sources_raw = ans.get("sources_json", "[]")
+                        try:
+                            _sources = _json.loads(_sources_raw) if _sources_raw else []
+                        except Exception:
+                            _sources = []
+
+                        if _sources:
+                            st.markdown("**📚 Fuentes consultadas**")
+                            _src_rows = []
+                            for s in _sources:
+                                link = s.get("link", "No disponible")
+                                link_cell = (
+                                    f"[{s.get('nombre','Fuente')}]({link})"
+                                    if link and link != "No disponible"
+                                    else s.get("nombre", "—")
+                                )
+                                _src_rows.append({
+                                    "Tipo":    s.get("tipo", "—"),
+                                    "Fuente":  link_cell,
+                                    "Resumen": s.get("resumen", "—"),
+                                })
+                            st.dataframe(
+                                _pd.DataFrame(_src_rows),
+                                use_container_width=True, hide_index=True,
+                                column_config={
+                                    "Fuente":  st.column_config.MarkdownColumn("Fuente", width="medium"),
+                                    "Resumen": st.column_config.TextColumn("Resumen", width="large"),
+                                },
+                            )
+                        else:
+                            st.caption("Sin fuentes registradas.")
+
+                st.divider()
+                _exp_rows = []
+                for ans in _answers:
+                    qi    = ans["question_id"]
+                    label = FAITH_LABELS[qi] if qi < len(FAITH_LABELS) else f"Criterio {qi+1}"
+                    try:
+                        srcs = _json.loads(ans.get("sources_json", "[]") or "[]")
+                    except Exception:
+                        srcs = []
+                    srcs_text = " | ".join(
+                        f"{s.get('tipo','')}: {s.get('nombre','')} — {s.get('resumen','')}"
+                        for s in srcs
+                    )
+                    _exp_rows.append({
+                        "Ticker": _faith_ticker, "Empresa": _faith_name,
+                        "Criterio": label, "Pregunta": ans.get("question_text", ""),
+                        "Resultado": ans.get("result", ""),
+                        "Evidencia": ans.get("criteria", ""),
+                        "Por qué no lo contrario": ans.get("why_not_opposite", ""),
+                        "Fuentes": srcs_text,
+                    })
+                st.download_button(
+                    "⬇️ Exportar como CSV",
+                    data=_pd.DataFrame(_exp_rows).to_csv(index=False).encode("utf-8"),
+                    file_name=f"faith_scorecard_{_faith_ticker}.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  PAGE: HELP / DOCUMENTATION
