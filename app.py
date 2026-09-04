@@ -5381,6 +5381,11 @@ Incluye entre 2 y 6 fuentes. Prioriza documentos oficiales de la empresa sobre p
                 _faith_selected_cos.append(_faith_rows[_ii])
         except (TypeError, ValueError):
             pass
+
+    if not _faith_selected_cos:
+        st.info("Selecciona una o varias empresas (máx. 10) para ver o ejecutar el Faith Scorecard.")
+        st.stop()
+
     _is_batch = len(_faith_selected_cos) > 1
 
     st.divider()
