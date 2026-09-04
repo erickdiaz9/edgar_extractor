@@ -5708,17 +5708,34 @@ Incluye entre 2 y 6 fuentes. Prioriza documentos oficiales de la empresa sobre p
 
                         if _sources:
                             st.markdown("**📚 Fuentes consultadas**")
+                            import urllib.parse as _up
+                            _cik = _faith_co.get("cik", "")
+
+                            def _reliable_link(s):
+                                tipo = (s.get("tipo") or "").upper()
+                                nombre = s.get("nombre") or ""
+                                # SEC filings → EDGAR company page
+                                if any(t in tipo for t in ("10-K", "10-Q", "ANNUAL", "PROXY", "DEF 14")):
+                                    if _cik:
+                                        return (
+                                            "https://www.sec.gov/cgi-bin/browse-edgar"
+                                            f"?action=getcompany&CIK={_cik}&type=10-K"
+                                            "&dateb=&owner=include&count=10"
+                                        )
+                                    return (
+                                        f"https://efts.sec.gov/LATEST/search-index"
+                                        f"?q=%22{_faith_ticker}%22&forms=10-K,10-Q"
+                                    )
+                                # Everything else → Google search
+                                q = _up.quote(f"{_faith_ticker} {nombre} {tipo}")
+                                return f"https://www.google.com/search?q={q}"
+
                             _src_rows = []
                             for s in _sources:
-                                link = s.get("link", "No disponible")
-                                link_cell = (
-                                    f"[{s.get('nombre','Fuente')}]({link})"
-                                    if link and link != "No disponible"
-                                    else s.get("nombre", "—")
-                                )
+                                url = _reliable_link(s)
                                 _src_rows.append({
                                     "Tipo":    s.get("tipo", "—"),
-                                    "Fuente":  link_cell,
+                                    "Fuente":  f"[{s.get('nombre','Fuente')}]({url})",
                                     "Resumen": s.get("resumen", "—"),
                                 })
                             st.dataframe(
