@@ -5087,8 +5087,7 @@ elif page == "✝️  Faith Scorecard":
                         "pe_ratio":   _to_float_f(row.get("pe", row.get("pe_ratio"))),
                     })
             if _kpi_seed:
-                # Upload to GCS only when we got a full dataset (protects against partial/failed fetches)
-                upsert_kpis(_kpi_seed, upload=len(_kpi_seed) > 100)
+                upsert_kpis(_kpi_seed, upload=False)
         except Exception:
             pass
         st.session_state["_faith_kpi_seeded"] = True
@@ -5249,7 +5248,56 @@ Incluye entre 2 y 6 fuentes. Prioriza documentos oficiales de la empresa sobre p
 
     # ── KPI / company list refresh ────────────────────────────────────────────
     if _faith_refresh:
-        st.session_state["_faith_kpi_seeded"] = False   # force re-seed next rerun
+        with st.spinner("Actualizando desde Google Sheets…"):
+            try:
+                import io as _io_r, requests as _req_r, re as _re_r
+                import pandas as _pd_r
+                _IMAP = {"S&P 500": "SP500", "S&P 400": "SP400", "S&P 600": "SP600"}
+                _df_r = _pd_r.read_csv(_io_r.StringIO(
+                    _req_r.get(
+                        "https://docs.google.com/spreadsheets/d/e/"
+                        "2PACX-1vTiCPfb9O_EpBlfLD9f5sutYQSZtCBI48YVTspTufa-12_2CKE1XfEHy4DB1HL-CP40H5kFTbDANELv"
+                        "/pub?output=csv",
+                        timeout=20, allow_redirects=True,
+                    ).text
+                ))
+                _df_r.columns = [c.strip() for c in _df_r.columns]
+                def _tof_r(v):
+                    try: f = float(v); return None if f != f else f
+                    except: return None
+                def _norm_r(s):
+                    return _re_r.sub(r'\b([A-Z]{2})([a-z]{3,})\b',
+                                     lambda m: m.group(1)[0] + m.group(1)[1].lower() + m.group(2), s)
+                _cos_r, _kpis_r = [], []
+                for _, _row_r in _df_r.iterrows():
+                    _tk_r = str(_row_r.get("ticker", "")).strip().upper()
+                    if not _tk_r:
+                        continue
+                    _cos_r.append({
+                        "ticker":       _tk_r,
+                        "name":         _norm_r(str(_row_r.get("company", "")).strip()),
+                        "sector":       str(_row_r.get("GICS_Sector", "")).strip(),
+                        "industry":     str(_row_r.get("GICS_Sub-Industry", "")).strip(),
+                        "index_member": _IMAP.get(str(_row_r.get("index", "")).strip(), "SP500"),
+                        "cik":          str(_row_r.get("CIK", "")).strip(),
+                        "sic_code": "", "sic_desc": "",
+                        "last_price":   _tof_r(_row_r.get("price")),
+                        "market_cap":   _tof_r(_row_r.get("marketcap")),
+                        "pe_ratio":     _tof_r(_row_r.get("pe")),
+                    })
+                    _kpis_r.append({"ticker": _tk_r,
+                                    "last_price":  _tof_r(_row_r.get("price")),
+                                    "market_cap":  _tof_r(_row_r.get("marketcap")),
+                                    "pe_ratio":    _tof_r(_row_r.get("pe"))})
+                if len(_cos_r) > 100:
+                    upsert_sp500_companies(_cos_r)  # full data → GCS
+                    upsert_kpis(_kpis_r)            # prices → GCS
+                    st.success(f"✅ {len(_cos_r)} empresas actualizadas.")
+                    st.session_state["_faith_kpi_seeded"] = True
+                else:
+                    st.error("Respuesta de Google Sheets insuficiente — intenta de nuevo.")
+            except Exception as _e_r:
+                st.error(f"Error al actualizar: {_e_r}")
         st.rerun()
 
     # Filter company list
