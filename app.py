@@ -5373,7 +5373,7 @@ Incluye entre 2 y 6 fuentes. Prioriza documentos oficiales de la empresa sobre p
         st.info("Selecciona una o varias empresas (máx. 10) para ver o ejecutar el Faith Scorecard.")
         st.stop()
 
-    _faith_selected_cos = [_faith_rows[i] for i in _faith_selected_idxs]
+    _faith_selected_cos = [_faith_rows[i] for i in _faith_selected_idxs if i < len(_faith_rows)]
     _is_batch = len(_faith_selected_cos) > 1
 
     st.divider()
