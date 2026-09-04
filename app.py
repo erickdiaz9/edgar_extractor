@@ -5339,6 +5339,7 @@ Incluye entre 2 y 6 fuentes. Prioriza documentos oficiales de la empresa sobre p
             "Estado":    status,
         })
     _faith_df = _pd.DataFrame(_faith_display)
+    _faith_df["Mkt Cap $B"] = _pd.to_numeric(_faith_df["Mkt Cap $B"], errors="coerce")
 
     _faith_sel = st.dataframe(
         _faith_df,
