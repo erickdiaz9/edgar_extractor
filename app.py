@@ -5719,129 +5719,216 @@ Incluye entre 2 y 6 fuentes. Prioriza documentos oficiales de la empresa sobre p
                 _overall_result = _disp_run.get("overall") or (
                     "PASS" if all(a["result"] == "PASS" for a in _answers) else "NO PASS"
                 )
+                _n_pass  = sum(1 for a in _answers if a["result"] == "PASS")
+                _n_total = len(_answers)
+                _n_fail  = _n_total - _n_pass
+
+                import urllib.parse as _up
+                _cik = _faith_co.get("cik", "")
+
+                # ── Verdict banner ──────────────────────────────────────────
                 if _overall_result == "PASS":
                     st.success(
-                        f"### ✅ {_faith_ticker} — PASS\n"
-                        "La empresa supera todos los criterios de inversión basada en fe.",
+                        f"✅ **{_faith_ticker} — PASS** &nbsp;·&nbsp; "
+                        f"{_n_pass}/{_n_total} criterios superados",
                         icon="✅",
                     )
                 else:
                     st.error(
-                        f"### ❌ {_faith_ticker} — NO PASS\n"
-                        "La empresa no supera uno o más criterios de inversión basada en fe.",
+                        f"❌ **{_faith_ticker} — NO PASS** &nbsp;·&nbsp; "
+                        f"{_n_fail} criterio(s) no superado(s) de {_n_total}",
                         icon="❌",
                     )
 
-                st.markdown("#### Resumen de criterios")
-                _sum_cols = st.columns(4)
-                for i, ans in enumerate(_answers):
-                    col   = _sum_cols[i % 4]
-                    label = FAITH_LABELS[ans["question_id"]] if ans["question_id"] < len(FAITH_LABELS) else f"Q{ans['question_id']+1}"
-                    short = label.split("/")[0].strip()
-                    with col:
-                        if ans["result"] == "PASS":
-                            st.success(f"✅ {short}", icon="✅")
-                        else:
-                            st.error(f"❌ {short}", icon="❌")
-
-                st.divider()
-                st.markdown("#### Detalle por criterio")
-                for ans in _answers:
-                    qi     = ans["question_id"]
-                    label  = FAITH_LABELS[qi] if qi < len(FAITH_LABELS) else f"Criterio {qi+1}"
-                    result = ans["result"]
-                    icon   = "✅" if result == "PASS" else "❌"
-
-                    with st.expander(f"{icon} **{label}** — {result}",
-                                     expanded=(result == "NO PASS")):
-                        with st.expander("📋 Ver prompt enviado", expanded=False):
-                            st.code(ans.get("prompt_used", ""), language=None)
-
-                        r1, r2 = st.columns(2)
-                        with r1:
-                            st.markdown("**Criterio / Evidencia**")
-                            st.markdown(ans.get("criteria", "—"))
-                        with r2:
-                            st.markdown("**¿Por qué no lo contrario?**")
-                            st.markdown(ans.get("why_not_opposite", "—"))
-
-                        _sources_raw = ans.get("sources_json", "[]")
-                        try:
-                            _sources = _json.loads(_sources_raw) if _sources_raw else []
-                        except Exception:
-                            _sources = []
-
-                        if _sources:
-                            st.markdown("**📚 Fuentes consultadas**")
-                            import urllib.parse as _up
-                            _cik = _faith_co.get("cik", "")
-
-                            def _reliable_link(s):
-                                tipo = (s.get("tipo") or "").upper()
-                                nombre = s.get("nombre") or ""
-                                # SEC filings → EDGAR company page
-                                if any(t in tipo for t in ("10-K", "10-Q", "ANNUAL", "PROXY", "DEF 14")):
-                                    if _cik:
-                                        return (
-                                            "https://www.sec.gov/cgi-bin/browse-edgar"
-                                            f"?action=getcompany&CIK={_cik}&type=10-K"
-                                            "&dateb=&owner=include&count=10"
-                                        )
-                                    return (
-                                        f"https://efts.sec.gov/LATEST/search-index"
-                                        f"?q=%22{_faith_ticker}%22&forms=10-K,10-Q"
-                                    )
-                                # Everything else → Google search
-                                q = _up.quote(f"{_faith_ticker} {nombre} {tipo}")
-                                return f"https://www.google.com/search?q={q}"
-
-                            _src_rows = []
-                            for s in _sources:
-                                url = _reliable_link(s)
-                                _src_rows.append({
-                                    "Tipo":    s.get("tipo", "—"),
-                                    "Fuente":  f"[{s.get('nombre','Fuente')}]({url})",
-                                    "Resumen": s.get("resumen", "—"),
-                                })
-                            st.dataframe(
-                                _pd.DataFrame(_src_rows),
-                                use_container_width=True, hide_index=True,
-                                column_config={
-                                    "Fuente":  st.column_config.MarkdownColumn("Fuente", width="medium"),
-                                    "Resumen": st.column_config.TextColumn("Resumen", width="large"),
-                                },
-                            )
-                        else:
-                            st.caption("Sin fuentes registradas.")
-
-                st.divider()
-                _exp_rows = []
-                for ans in _answers:
-                    qi    = ans["question_id"]
-                    label = FAITH_LABELS[qi] if qi < len(FAITH_LABELS) else f"Criterio {qi+1}"
-                    try:
-                        srcs = _json.loads(ans.get("sources_json", "[]") or "[]")
-                    except Exception:
-                        srcs = []
-                    srcs_text = " | ".join(
-                        f"{s.get('tipo','')}: {s.get('nombre','')} — {s.get('resumen','')}"
-                        for s in srcs
-                    )
-                    _exp_rows.append({
-                        "Ticker": _faith_ticker, "Empresa": _faith_name,
-                        "Criterio": label, "Pregunta": ans.get("question_text", ""),
-                        "Resultado": ans.get("result", ""),
-                        "Evidencia": ans.get("criteria", ""),
-                        "Por qué no lo contrario": ans.get("why_not_opposite", ""),
-                        "Fuentes": srcs_text,
-                    })
-                st.download_button(
-                    "⬇️ Exportar como CSV",
-                    data=_pd.DataFrame(_exp_rows).to_csv(index=False).encode("utf-8"),
-                    file_name=f"faith_scorecard_{_faith_ticker}.csv",
-                    mime="text/csv",
-                    use_container_width=True,
+                # ── Tabs ────────────────────────────────────────────────────
+                _tab_res, _tab_crit, _tab_etf, _tab_exp = st.tabs(
+                    ["📊 Resumen", "📋 Criterios", "🏦 ETFs Faith", "⬇️ Exportar"]
                 )
+
+                # ── RESUMEN ─────────────────────────────────────────────────
+                with _tab_res:
+                    _tile_cols = st.columns(min(_n_total, 7))
+                    for i, ans in enumerate(_answers):
+                        qi    = ans["question_id"]
+                        label = FAITH_LABELS[qi] if qi < len(FAITH_LABELS) else f"Q{qi+1}"
+                        short = label.split("/")[0].strip()
+                        with _tile_cols[i % 7]:
+                            if ans["result"] == "PASS":
+                                st.success(f"✅ {short}")
+                            else:
+                                st.error(f"❌ {short}")
+
+                    st.divider()
+                    try:
+                        import plotly.graph_objects as _go
+                        _clrs  = ["#22c55e" if a["result"] == "PASS" else "#ef4444"
+                                  for a in _answers]
+                        _xlbls = [
+                            (FAITH_LABELS[a["question_id"]]
+                             if a["question_id"] < len(FAITH_LABELS)
+                             else f"Q{a['question_id']+1}").split("/")[0].strip()
+                            for a in _answers
+                        ]
+                        _fig = _go.Figure(_go.Bar(
+                            x=_xlbls, y=[1]*_n_total,
+                            marker_color=_clrs,
+                            text=["PASS" if a["result"] == "PASS" else "NO PASS"
+                                  for a in _answers],
+                            textposition="inside",
+                            textfont=dict(color="white", size=13),
+                            hovertemplate="%{x}<br>%{text}<extra></extra>",
+                        ))
+                        _fig.update_layout(
+                            yaxis=dict(visible=False, range=[0, 1.4]),
+                            xaxis=dict(tickfont=dict(size=11)),
+                            plot_bgcolor="rgba(0,0,0,0)",
+                            paper_bgcolor="rgba(0,0,0,0)",
+                            margin=dict(t=10, b=10, l=0, r=0),
+                            height=200, showlegend=False,
+                        )
+                        st.plotly_chart(_fig, use_container_width=True)
+                    except Exception:
+                        pass
+
+                # ── CRITERIOS ───────────────────────────────────────────────
+                with _tab_crit:
+                    def _reliable_link(s):
+                        tipo   = (s.get("tipo") or "").upper()
+                        nombre = s.get("nombre") or ""
+                        if any(t in tipo for t in ("10-K","10-Q","ANNUAL","PROXY","DEF 14")):
+                            if _cik:
+                                return (
+                                    "https://www.sec.gov/cgi-bin/browse-edgar"
+                                    f"?action=getcompany&CIK={_cik}&type=10-K"
+                                    "&dateb=&owner=include&count=10"
+                                )
+                            return (f"https://efts.sec.gov/LATEST/search-index"
+                                    f"?q=%22{_faith_ticker}%22&forms=10-K,10-Q")
+                        q = _up.quote(f"{_faith_ticker} {nombre} {tipo}")
+                        return f"https://www.google.com/search?q={q}"
+
+                    for ans in _answers:
+                        qi     = ans["question_id"]
+                        label  = FAITH_LABELS[qi] if qi < len(FAITH_LABELS) else f"Criterio {qi+1}"
+                        result = ans["result"]
+                        icon   = "✅" if result == "PASS" else "❌"
+                        with st.expander(f"{icon} **{label}** — {result}",
+                                         expanded=(result == "NO PASS")):
+                            with st.expander("📋 Ver prompt enviado", expanded=False):
+                                st.code(ans.get("prompt_used", ""), language=None)
+                            r1, r2 = st.columns(2)
+                            with r1:
+                                st.markdown("**Criterio / Evidencia**")
+                                st.markdown(ans.get("criteria", "—"))
+                            with r2:
+                                st.markdown("**¿Por qué no lo contrario?**")
+                                st.markdown(ans.get("why_not_opposite", "—"))
+                            try:
+                                _sources = _json.loads(
+                                    ans.get("sources_json", "[]") or "[]"
+                                )
+                            except Exception:
+                                _sources = []
+                            if _sources:
+                                st.markdown("**📚 Fuentes consultadas**")
+                                _src_rows = [
+                                    {
+                                        "Tipo":    s.get("tipo", "—"),
+                                        "Fuente":  f"[{s.get('nombre','Fuente')}]({_reliable_link(s)})",
+                                        "Resumen": s.get("resumen", "—"),
+                                    }
+                                    for s in _sources
+                                ]
+                                st.dataframe(
+                                    _pd.DataFrame(_src_rows),
+                                    use_container_width=True, hide_index=True,
+                                    column_config={
+                                        "Fuente":  st.column_config.MarkdownColumn(
+                                                       "Fuente", width="medium"),
+                                        "Resumen": st.column_config.TextColumn(
+                                                       "Resumen", width="large"),
+                                    },
+                                )
+                            else:
+                                st.caption("Sin fuentes registradas.")
+
+                # ── ETFs Faith ──────────────────────────────────────────────
+                with _tab_etf:
+                    _ETF_FAMILY_DEF = [
+                        ("Ave Maria", ["AVEAX","AVEDX","AVEMX","AVERX","AVEUX","AVEWX"]),
+                        ("Inspire",   ["BIBL","BLES","FDLS","GLRY","PTL"]),
+                        ("CATH",      ["CATH"]),
+                        ("USETHOS",   ["USETHOS"]),
+                    ]
+                    _co_etf_set = set(_etf_map.get(_faith_ticker.upper(), []))
+                    _etf_tbl = []
+                    for _fam, _etfs in _ETF_FAMILY_DEF:
+                        for _e in _etfs:
+                            _etf_tbl.append({
+                                "Familia":  _fam,
+                                "ETF":      _e,
+                                "¿Incluida?": "✅ Sí" if _e in _co_etf_set else "❌ No",
+                            })
+                    st.dataframe(
+                        _pd.DataFrame(_etf_tbl),
+                        use_container_width=True, hide_index=True,
+                        column_config={
+                            "Familia":    st.column_config.TextColumn(width="medium"),
+                            "ETF":        st.column_config.TextColumn(width="small"),
+                            "¿Incluida?": st.column_config.TextColumn(width="small"),
+                        },
+                    )
+                    if not _co_etf_set:
+                        st.caption(
+                            "Esta empresa no está incluida en ninguno de los ETFs faith "
+                            "analizados. Eso no significa que sea mala inversión — puede "
+                            "simplemente no haber sido analizada por esos fondos aún."
+                        )
+                    else:
+                        _fams_present = sorted({
+                            _ETF_FAMILIES.get(_e, _e) for _e in _co_etf_set
+                        })
+                        st.info(
+                            f"✅ Incluida en {len(_co_etf_set)} ETF(s) faith de "
+                            f"{len(_fams_present)} familia(s): "
+                            + ", ".join(_fams_present)
+                        )
+
+                # ── EXPORTAR ────────────────────────────────────────────────
+                with _tab_exp:
+                    _exp_rows = []
+                    for ans in _answers:
+                        qi    = ans["question_id"]
+                        label = FAITH_LABELS[qi] if qi < len(FAITH_LABELS) else f"Criterio {qi+1}"
+                        try:
+                            srcs = _json.loads(ans.get("sources_json", "[]") or "[]")
+                        except Exception:
+                            srcs = []
+                        srcs_text = " | ".join(
+                            f"{s.get('tipo','')}: {s.get('nombre','')} — {s.get('resumen','')}"
+                            for s in srcs
+                        )
+                        _exp_rows.append({
+                            "Ticker":    _faith_ticker,
+                            "Empresa":   _faith_name,
+                            "Criterio":  label,
+                            "Pregunta":  ans.get("question_text", ""),
+                            "Resultado": ans.get("result", ""),
+                            "Evidencia": ans.get("criteria", ""),
+                            "Por qué no lo contrario": ans.get("why_not_opposite", ""),
+                            "Fuentes":   srcs_text,
+                        })
+                    st.dataframe(
+                        _pd.DataFrame(_exp_rows),
+                        use_container_width=True, hide_index=True,
+                    )
+                    st.download_button(
+                        "⬇️ Descargar CSV",
+                        data=_pd.DataFrame(_exp_rows).to_csv(index=False).encode("utf-8"),
+                        file_name=f"faith_scorecard_{_faith_ticker}.csv",
+                        mime="text/csv",
+                        use_container_width=True,
+                    )
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  PAGE: HELP / DOCUMENTATION
