@@ -5092,6 +5092,42 @@ elif page == "✝️  Faith Scorecard":
             pass
         st.session_state["_faith_kpi_seeded"] = True
 
+    # ── ETF membership map (ticker → list of faith ETFs that hold it) ─────────
+    @st.cache_data(show_spinner=False)
+    def _load_etf_map():
+        import csv, os
+        _etf_csv = os.path.join(os.path.dirname(__file__), "faith_etf_map.csv")
+        mapping = {}
+        try:
+            with open(_etf_csv, newline="", encoding="utf-8") as f:
+                for row in csv.DictReader(f):
+                    t = row["ticker"].strip().upper()
+                    e = row["etf"].strip()
+                    if t and e:
+                        mapping.setdefault(t, [])
+                        if e not in mapping[t]:
+                            mapping[t].append(e)
+        except Exception:
+            pass
+        return mapping
+
+    _etf_map = _load_etf_map()
+
+    # ── ETF family labels (for display) ────────────────────────────────────────
+    _ETF_FAMILIES = {
+        "AVEAX": "Ave Maria", "AVEDX": "Ave Maria", "AVEMX": "Ave Maria",
+        "AVERX": "Ave Maria", "AVEUX": "Ave Maria", "AVEWX": "Ave Maria",
+        "BIBL": "Inspire", "BLES": "Inspire", "FDLS": "Inspire",
+        "GLRY": "Inspire", "PTL": "Inspire",
+        "CATH": "CATH", "USETHOS": "USETHOS",
+    }
+
+    def _etf_badge_text(ticker):
+        etfs = _etf_map.get(ticker.upper(), [])
+        if not etfs:
+            return "—"
+        return " · ".join(sorted(etfs))
+
     # ── 7 Faith questions ─────────────────────────────────────────────────────
     FAITH_QUESTIONS = [
         "¿La compañía tiene como negocio principal o apoya activamente la producción o distribución de abortivos o anticonceptivos, o la práctica de abortos?",
@@ -5335,11 +5371,13 @@ Incluye entre 2 y 6 fuentes. Prioriza documentos oficiales de la empresa sobre p
             "Índice":    r.get("index_member") or "SP500",
             "Mkt Cap $B": _to_mcap_billions(r.get("market_cap")),
             "Sector":    r.get("sector", ""),
+            "ETFs":      _etf_badge_text(r["ticker"]),
             "Resultado": overall,
             "Estado":    status,
         })
     _faith_df = _pd.DataFrame(_faith_display)
-    _faith_df["Mkt Cap $B"] = _pd.to_numeric(_faith_df["Mkt Cap $B"], errors="coerce")
+    if not _faith_df.empty and "Mkt Cap $B" in _faith_df.columns:
+        _faith_df["Mkt Cap $B"] = _pd.to_numeric(_faith_df["Mkt Cap $B"], errors="coerce")
 
     _faith_sel = st.dataframe(
         _faith_df,
@@ -5351,6 +5389,7 @@ Incluye entre 2 y 6 fuentes. Prioriza documentos oficiales de la empresa sobre p
             "Índice":     st.column_config.TextColumn(width="small"),
             "Mkt Cap $B": st.column_config.NumberColumn(
                             "Mkt Cap $B", format="$%.1f B", width="small"),
+            "ETFs":       st.column_config.TextColumn("ETFs Faith", width="medium"),
             "Resultado":  st.column_config.TextColumn(width="small"),
             "Estado":     st.column_config.TextColumn(width="small"),
         },
@@ -5543,6 +5582,7 @@ Incluye entre 2 y 6 fuentes. Prioriza documentos oficiales de la empresa sobre p
             row = {
                 "Ticker":  co["ticker"],
                 "Empresa": co.get("name", ""),
+                "ETFs":    _etf_badge_text(co["ticker"]),
                 "Overall": ex.get("overall") or "—",
             }
             for qi, lbl in enumerate(FAITH_LABELS):
@@ -5606,6 +5646,18 @@ Incluye entre 2 y 6 fuentes. Prioriza documentos oficiales de la empresa sobre p
                 f"{_faith_co.get('sector','—')} · {_faith_co.get('industry','—')} · "
                 f"{_faith_co.get('index_member','—')}"
             )
+            _co_etfs = _etf_map.get(_faith_ticker.upper(), [])
+            if _co_etfs:
+                _etf_groups = {}
+                for _e in sorted(_co_etfs):
+                    _fam = _ETF_FAMILIES.get(_e, _e)
+                    _etf_groups.setdefault(_fam, []).append(_e)
+                _etf_parts = []
+                for _fam, _tickers in sorted(_etf_groups.items()):
+                    _etf_parts.append(f"**{_fam}**: {', '.join(_tickers)}")
+                st.success("🏦 Incluida en ETFs faith: " + "  |  ".join(_etf_parts))
+            else:
+                st.caption("📭 No incluida en los ETFs faith analizados.")
         with d2:
             existing_run = get_faith_run(_faith_ticker, _faith_llm.lower())
             if existing_run and existing_run.get("overall"):
