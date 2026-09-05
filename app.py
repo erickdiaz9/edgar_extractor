@@ -5772,6 +5772,24 @@ Incluye entre 2 y 6 fuentes. Prioriza documentos oficiales de la empresa sobre p
                                 else:
                                     st.error(f"❌ {short}")
 
+                    st.divider()
+                    st.caption("Inclusión en familias de ETFs faith")
+                    _etf_fam_cols = st.columns(4)
+                    _etf_fam_defs = [
+                        ("Ave Maria", ["AVEAX","AVEDX","AVEMX","AVERX","AVEUX","AVEWX"]),
+                        ("Inspire",   ["BIBL","BLES","FDLS","GLRY","PTL"]),
+                        ("CATH",      ["CATH"]),
+                        ("USETHOS",   ["USETHOS"]),
+                    ]
+                    _co_etfs_res = set(_etf_map.get(_faith_ticker.upper(), []))
+                    for i, (_fam_name, _fam_etfs) in enumerate(_etf_fam_defs):
+                        _in_fam = any(e in _co_etfs_res for e in _fam_etfs)
+                        with _etf_fam_cols[i]:
+                            if _in_fam:
+                                st.success(f"✅ {_fam_name}")
+                            else:
+                                st.error(f"❌ {_fam_name}")
+
                 # ── CRITERIOS ───────────────────────────────────────────────
                 with _tab_crit:
                     def _reliable_link(s):
