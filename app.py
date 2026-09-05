@@ -5747,48 +5747,30 @@ Incluye entre 2 y 6 fuentes. Prioriza documentos oficiales de la empresa sobre p
 
                 # ── RESUMEN ─────────────────────────────────────────────────
                 with _tab_res:
-                    _tile_cols = st.columns(min(_n_total, 7))
-                    for i, ans in enumerate(_answers):
+                    # Row 1: first 4 criteria
+                    _row1 = st.columns(4)
+                    for i, ans in enumerate(_answers[:4]):
                         qi    = ans["question_id"]
                         label = FAITH_LABELS[qi] if qi < len(FAITH_LABELS) else f"Q{qi+1}"
                         short = label.split("/")[0].strip()
-                        with _tile_cols[i % 7]:
+                        with _row1[i]:
                             if ans["result"] == "PASS":
                                 st.success(f"✅ {short}")
                             else:
                                 st.error(f"❌ {short}")
-
-                    st.divider()
-                    try:
-                        import plotly.graph_objects as _go
-                        _clrs  = ["#22c55e" if a["result"] == "PASS" else "#ef4444"
-                                  for a in _answers]
-                        _xlbls = [
-                            (FAITH_LABELS[a["question_id"]]
-                             if a["question_id"] < len(FAITH_LABELS)
-                             else f"Q{a['question_id']+1}").split("/")[0].strip()
-                            for a in _answers
-                        ]
-                        _fig = _go.Figure(_go.Bar(
-                            x=_xlbls, y=[1]*_n_total,
-                            marker_color=_clrs,
-                            text=["PASS" if a["result"] == "PASS" else "NO PASS"
-                                  for a in _answers],
-                            textposition="inside",
-                            textfont=dict(color="white", size=13),
-                            hovertemplate="%{x}<br>%{text}<extra></extra>",
-                        ))
-                        _fig.update_layout(
-                            yaxis=dict(visible=False, range=[0, 1.4]),
-                            xaxis=dict(tickfont=dict(size=11)),
-                            plot_bgcolor="rgba(0,0,0,0)",
-                            paper_bgcolor="rgba(0,0,0,0)",
-                            margin=dict(t=10, b=10, l=0, r=0),
-                            height=200, showlegend=False,
-                        )
-                        st.plotly_chart(_fig, use_container_width=True)
-                    except Exception:
-                        pass
+                    # Row 2: remaining criteria (3 for 7-question set)
+                    _remaining = _answers[4:]
+                    if _remaining:
+                        _row2 = st.columns(len(_remaining))
+                        for i, ans in enumerate(_remaining):
+                            qi    = ans["question_id"]
+                            label = FAITH_LABELS[qi] if qi < len(FAITH_LABELS) else f"Q{qi+1}"
+                            short = label.split("/")[0].strip()
+                            with _row2[i]:
+                                if ans["result"] == "PASS":
+                                    st.success(f"✅ {short}")
+                                else:
+                                    st.error(f"❌ {short}")
 
                 # ── CRITERIOS ───────────────────────────────────────────────
                 with _tab_crit:
