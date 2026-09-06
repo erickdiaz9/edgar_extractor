@@ -5789,6 +5789,13 @@ Incluye entre 2 y 6 fuentes. Prioriza documentos oficiales de la empresa sobre p
                                 st.success(f"✅ {_fam_name}")
                             else:
                                 st.error(f"❌ {_fam_name}")
+                    st.caption(
+                        "❗ Nota: no estar incluido en un ETF no implica que la empresa "
+                        "haya reprobado los criterios de esa familia de fondos. Simplemente "
+                        "no forma parte de su portafolio actual. Las listas de empresas que "
+                        "aprueban o reprueban los criterios propietarios de cada familia son "
+                        "información confidencial."
+                    )
 
                 # ── CRITERIOS ───────────────────────────────────────────────
                 with _tab_crit:
